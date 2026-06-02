@@ -34,53 +34,52 @@ Sub GenerarBasesLimpias()
     On Error GoTo Limpieza
 
     ' --- Cargar la lista de fondos deseados (hoja "Fondos") ---
-    ' dicDeseados: clave = código SBS, valor = nombre de etiqueta a mostrar
     Dim dicDeseados As Object
     Set dicDeseados = CargarFondosDeseados(wbDest)
-    ' Si está vacía -> procesa todos los fondos
 
     ' --- Seleccionar el archivo Marcas con un cuadro de diálogo ---
     Dim rutaSel As String
     rutaSel = SeleccionarArchivo()
     If Len(rutaSel) = 0 Then GoTo Limpieza   ' el usuario canceló
 
-    ' Si ese archivo ya está abierto, reutilizarlo; si no, abrirlo en solo lectura
     Set wbMarcas = ObtenerLibroAbierto(rutaSel)
     If wbMarcas Is Nothing Then
         Set wbMarcas = Workbooks.Open(Filename:=rutaSel, ReadOnly:=True, UpdateLinks:=0)
-        loAbriYo = True   ' solo cerramos lo que nosotros abrimos
+        loAbriYo = True
     End If
 
     ' Diccionarios maestros
     Dim dicFondos As Object   ' clave=etiquetaFondo -> dic mensual
     Dim dicMeses As Object    ' set global de meses "AAAA-MM"
     Dim ordenFondos As Object ' clave=etiquetaFondo -> índice de aparición
+    Dim dicOrigen As Object   ' clave=etiquetaFondo -> "Local" / "Extranjero"
     Set dicFondos = CreateObject("Scripting.Dictionary")
     Set dicMeses = CreateObject("Scripting.Dictionary")
     Set ordenFondos = CreateObject("Scripting.Dictionary")
+    Set dicOrigen = CreateObject("Scripting.Dictionary")
 
-    ProcesarHoja wbMarcas, "1", dicFondos, dicMeses, ordenFondos, dicDeseados
-    ProcesarHoja wbMarcas, "2", dicFondos, dicMeses, ordenFondos, dicDeseados
+    ' Hoja "1" = Locales ; Hoja "2" = Extranjeros
+    ProcesarHoja wbMarcas, "1", "Local", dicFondos, dicMeses, ordenFondos, dicDeseados, dicOrigen
+    ProcesarHoja wbMarcas, "2", "Extranjero", dicFondos, dicMeses, ordenFondos, dicDeseados, dicOrigen
 
-    ' Solo cerrar si la macro fue quien lo abrió; si ya estaba abierto, lo dejamos
     If loAbriYo Then wbMarcas.Close SaveChanges:=False
     Set wbMarcas = Nothing
 
-    ' --- Bases madre mensuales (fondo x meses) ---
+    ' --- Bases madre mensuales (fondo x meses) con columna Origen ---
     Dim mesesOrdenados As Variant
     mesesOrdenados = OrdenarClaves(dicMeses)
 
-    EscribirHojaMetrica wbDest, "Base_CC", 0, dicFondos, ordenFondos, mesesOrdenados
-    EscribirHojaMetrica wbDest, "Base_DD", 1, dicFondos, ordenFondos, mesesOrdenados
-    EscribirHojaMetrica wbDest, "Base_NAV", 2, dicFondos, ordenFondos, mesesOrdenados
+    EscribirHojaMetrica wbDest, "Base_CC", 0, dicFondos, ordenFondos, dicOrigen, mesesOrdenados
+    EscribirHojaMetrica wbDest, "Base_DD", 1, dicFondos, ordenFondos, dicOrigen, mesesOrdenados
+    EscribirHojaMetrica wbDest, "Base_NAV", 2, dicFondos, ordenFondos, dicOrigen, mesesOrdenados
 
-    ' --- Bases anuales por fondo (suma de meses por año) ---
-    EscribirHojaAnual wbDest, "Anual_CC", 0, dicFondos, ordenFondos
-    EscribirHojaAnual wbDest, "Anual_DD", 1, dicFondos, ordenFondos
-    EscribirHojaAnual wbDest, "Anual_NAV", 2, dicFondos, ordenFondos
+    ' --- Bases anuales por fondo (suma de meses por año) con columna Origen ---
+    EscribirHojaAnual wbDest, "Anual_CC", 0, dicFondos, ordenFondos, dicOrigen
+    EscribirHojaAnual wbDest, "Anual_DD", 1, dicFondos, ordenFondos, dicOrigen
+    EscribirHojaAnual wbDest, "Anual_NAV", 2, dicFondos, ordenFondos, dicOrigen
 
-    ' --- Consolidado anual + gráficos ---
-    GenerarConsolidadoAnual wbDest, dicFondos
+    ' --- Consolidado anual + gráficos (combinado + separados por origen) ---
+    GenerarConsolidadoAnual wbDest, dicFondos, dicOrigen
 
     MsgBox "Listo en " & Format(Timer - t, "0.0") & " seg." & vbCrLf & _
            dicFondos.Count & " fondos procesados.", vbInformation
@@ -101,11 +100,6 @@ End Sub
 
 ' ============================================================
 '  CARGAR LISTA DE FONDOS DESEADOS (hoja "Fondos")
-'  Estructura esperada en la hoja:
-'    A1 = "Nombre" | B1 = "Codigo SBS"   (encabezados, fila 1)
-'    A2 en adelante = nombre, B2 = código SBS
-'  Devuelve dic: clave = código SBS (Trim), valor = nombre
-'  Si la hoja no existe o está vacía -> devuelve dic vacío (procesa todos)
 ' ============================================================
 Private Function CargarFondosDeseados(wb As Workbook) As Object
     Dim dic As Object
@@ -117,28 +111,27 @@ Private Function CargarFondosDeseados(wb As Workbook) As Object
     On Error GoTo 0
 
     If ws Is Nothing Then
-        ' Crear la hoja con encabezados para que el usuario la complete
         Set ws = wb.Worksheets.Add(Before:=wb.Worksheets(1))
         ws.Name = HOJA_CONFIG
         ws.Cells(1, 1).Value = "Nombre"
         ws.Cells(1, 2).Value = "Codigo SBS"
         ws.Range("A1:B1").Font.Bold = True
         ws.Columns("A:B").ColumnWidth = 22
-        Set CargarFondosDeseados = dic   ' vacío -> procesa todos
+        Set CargarFondosDeseados = dic
         Exit Function
     End If
 
     Dim ultFila As Long
-    ultFila = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row   ' última fila con código (col B)
+    ultFila = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
     If ultFila < 2 Then
-        Set CargarFondosDeseados = dic   ' sin datos -> procesa todos
+        Set CargarFondosDeseados = dic
         Exit Function
     End If
 
     Dim r As Long, cod As String, nom As String
     For r = 2 To ultFila
-        cod = Trim(CStr(ws.Cells(r, 2).Value & ""))   ' código SBS como texto
-        nom = Trim(CStr(ws.Cells(r, 1).Value & ""))   ' nombre etiqueta
+        cod = Trim(CStr(ws.Cells(r, 2).Value & ""))
+        nom = Trim(CStr(ws.Cells(r, 1).Value & ""))
         If Len(cod) > 0 Then
             If Len(nom) = 0 Then nom = cod
             If Not dic.Exists(cod) Then dic.Add cod, nom
@@ -151,29 +144,28 @@ End Function
 ' ============================================================
 '  PROCESAR UNA HOJA (detección de fondos y segundo bloque)
 ' ============================================================
-Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
+Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal origen As String, _
                          dicFondos As Object, dicMeses As Object, ordenFondos As Object, _
-                         dicDeseados As Object)
+                         dicDeseados As Object, dicOrigen As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
     On Error GoTo 0
-    If ws Is Nothing Then Exit Sub  ' la hoja puede no existir
+    If ws Is Nothing Then Exit Sub
 
-    ' Leer toda la hoja a un array en memoria
     Dim ur As Range
     Set ur = ws.UsedRange
     Dim datos As Variant
     datos = ur.Value
     If IsEmpty(datos) Then Exit Sub
-    If Not IsArray(datos) Then Exit Sub   ' UsedRange de una sola celda
+    If Not IsArray(datos) Then Exit Sub
 
     Dim nFilas As Long, nCols As Long
     nFilas = UBound(datos, 1)
     nCols = UBound(datos, 2)
     If nFilas < FILA_ENCABEZADO_DIARIO Then Exit Sub
 
-    ' --- Detectar columnas de inicio de cada fondo: "Día"/"Dia" en fila 3 ---
+    ' Detectar columnas de inicio de cada fondo: "Día"/"Dia" en fila 3
     Dim colsInicio() As Long
     Dim nFondos As Long: nFondos = 0
     ReDim colsInicio(1 To nCols)
@@ -189,9 +181,8 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
     If nFondos = 0 Then Exit Sub
 
     Dim filtrar As Boolean
-    filtrar = (dicDeseados.Count > 0)   ' si hay lista, filtramos por código SBS
+    filtrar = (dicDeseados.Count > 0)
 
-    ' --- Procesar cada fondo ---
     Dim f As Long, colIni As Long, colFin As Long
     For f = 1 To nFondos
         colIni = colsInicio(f)
@@ -201,23 +192,23 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
             colFin = nCols
         End If
 
-        ' Código SBS del fondo (fila 2, columna de inicio)
         Dim codSBS As String
         codSBS = Trim(CStr(datos(FILA_CODIGO_SBS, colIni) & ""))
 
-        ' Nombre original del fondo (fila 1)
         Dim nombreFondo As String
         nombreFondo = Trim(CStr(datos(1, colIni) & ""))
         If Len(nombreFondo) = 0 Then nombreFondo = "Fondo_col" & colIni
 
-        ' Si filtramos, saltar fondos cuyo código no esté en la lista
         Dim etiqueta As String
         If filtrar Then
             If Not dicDeseados.Exists(codSBS) Then GoTo SiguienteFondo
-            etiqueta = CStr(dicDeseados(codSBS))   ' usar nombre de la hoja Fondos
+            etiqueta = CStr(dicDeseados(codSBS))
         Else
             etiqueta = nombreFondo
         End If
+
+        ' Registrar el origen de este fondo (Local / Extranjero)
+        If Not dicOrigen.Exists(etiqueta) Then dicOrigen.Add etiqueta, origen
 
         ProcesarFondo datos, nFilas, colIni, colFin, etiqueta, _
                       dicFondos, dicMeses, ordenFondos
@@ -233,7 +224,6 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal etiqueta As String, _
                           dicFondos As Object, dicMeses As Object, ordenFondos As Object)
 
-    ' 1) Buscar fila donde inicia el segundo bloque (encabezados F1/CC/DD/NAV/%)
     Dim filaHdr As Long: filaHdr = 0
     Dim r As Long
     For r = FILA_ENCABEZADO_DIARIO + 1 To nFilas
@@ -242,9 +232,8 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             Exit For
         End If
     Next r
-    If filaHdr = 0 Then Exit Sub  ' este fondo no tiene segundo bloque
+    If filaHdr = 0 Then Exit Sub
 
-    ' 2) Mapear columnas del segundo bloque por encabezado
     Dim colCC As Long, colDD As Long, colNAV As Long
     colCC = 0: colDD = 0: colNAV = 0
     Dim c As Long, h As String
@@ -256,9 +245,8 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             Case "NAV": colNAV = c
         End Select
     Next c
-    If colNAV = 0 Then Exit Sub  ' sin NAV no hay nada que consolidar
+    If colNAV = 0 Then Exit Sub
 
-    ' 3) Diccionario mensual de este fondo
     Dim dicMes As Object
     If dicFondos.Exists(etiqueta) Then
         Set dicMes = dicFondos(etiqueta)
@@ -268,9 +256,7 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
         ordenFondos.Add etiqueta, ordenFondos.Count
     End If
 
-    ' 4) Recorrer filas de datos del segundo bloque
-    '    Ajuste va DEBAJO del original:
-    '    -> último NAV manda; CC/DD se conservan del primer registro del mes.
+    ' Ajuste va DEBAJO del original: último NAV manda; CC/DD del primer registro del mes.
     Dim clave As String, valFecha As Variant
     Dim cc As Double, dd As Double, nav As Double
     Dim arr As Variant
@@ -278,12 +264,10 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
     For r = filaHdr + 1 To nFilas
         valFecha = datos(r, colIni)
 
-        ' Fila vacía o texto vacío -> fin del segundo bloque
         If IsEmpty(valFecha) Or Trim(CStr(valFecha & "")) = "" Then
             Exit For
         End If
 
-        ' Parsear fecha (real o texto mmm-aa). Si no es fecha -> fin del bloque
         clave = ParsearMesAnio(valFecha)
         If clave = "" Then Exit For
 
@@ -292,7 +276,6 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
         nav = LeerNumero(datos, r, colNAV)
 
         If dicMes.Exists(clave) Then
-            ' Ajuste mismo mes: conservar CC/DD originales, actualizar NAV
             arr = dicMes(clave)
             arr(2) = nav
             dicMes(clave) = arr
@@ -319,7 +302,6 @@ Private Function LeerNumero(datos As Variant, ByVal r As Long, ByVal c As Long) 
     If IsNumeric(v) Then LeerNumero = CDbl(v) Else LeerNumero = 0
 End Function
 
-' Abre un cuadro de diálogo para que el usuario elija el archivo Marcas.
 Private Function SeleccionarArchivo() As String
     SeleccionarArchivo = ""
     With Application.FileDialog(msoFileDialogFilePicker)
@@ -334,7 +316,6 @@ Private Function SeleccionarArchivo() As String
     End With
 End Function
 
-' Devuelve el workbook si ya está abierto (por nombre de archivo), o Nothing
 Private Function ObtenerLibroAbierto(ByVal rutaCompleta As String) As Workbook
     Dim soloNombre As String
     soloNombre = Mid(rutaCompleta, InStrRev(rutaCompleta, "\") + 1)
@@ -349,17 +330,14 @@ Private Function ObtenerLibroAbierto(ByVal rutaCompleta As String) As Workbook
     Set ObtenerLibroAbierto = Nothing
 End Function
 
-' Parsear fecha mmm-aa (fecha real O texto en español). Devuelve "yyyy-mm" o "".
 Private Function ParsearMesAnio(ByVal v As Variant) As String
     ParsearMesAnio = ""
 
-    ' Caso 1: ya es fecha real (FIN.MES devuelve fecha)
     If IsDate(v) Then
         ParsearMesAnio = Format(CDate(v), "yyyy-mm")
         Exit Function
     End If
 
-    ' Caso 2: texto "ene-26", "Dic-25", "ene 26", "ene/26"
     Dim s As String
     s = LCase(Trim(CStr(v & "")))
     If Len(s) = 0 Then Exit Function
@@ -400,7 +378,6 @@ Private Function ParsearMesAnio(ByVal v As Variant) As String
     ParsearMesAnio = Format(yy, "0000") & "-" & Format(mm, "00")
 End Function
 
-' Ordenar claves de un diccionario como texto (sirve para "AAAA-MM" y años)
 Private Function OrdenarClaves(dic As Object) As Variant
     Dim n As Long: n = dic.Count
     If n = 0 Then OrdenarClaves = Array(): Exit Function
@@ -424,13 +401,13 @@ Private Function OrdenarClaves(dic As Object) As Variant
 End Function
 
 ' ============================================================
-'  ESCRIBIR HOJA DE UNA MÉTRICA MENSUAL (CC=0, DD=1, NAV=2)
-'  Una fila por fondo, una columna por mes "AAAA-MM"
+'  ESCRIBIR HOJA MENSUAL (CC=0, DD=1, NAV=2) con columna Origen
+'  Fondo | Origen | mes1 | mes2 | ...
 ' ============================================================
 Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
                                 ByVal idxMetrica As Long, _
                                 dicFondos As Object, ordenFondos As Object, _
-                                mesesOrdenados As Variant)
+                                dicOrigen As Object, mesesOrdenados As Variant)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -449,17 +426,19 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
         On Error GoTo 0
     End If
 
+    ' Encabezados: Fondo | Origen | meses...
     ws.Cells(1, 1).Value = "Fondo"
+    ws.Cells(1, 2).Value = "Origen"
     Dim m As Long
     For m = 0 To nMeses - 1
-        ws.Cells(1, 2 + m).Value = CStr(mesesOrdenados(m))
+        ws.Cells(1, 3 + m).Value = CStr(mesesOrdenados(m))
     Next m
 
     Dim nFondos As Long: nFondos = dicFondos.Count
     If nFondos = 0 Then Exit Sub
 
     Dim salida() As Variant
-    ReDim salida(1 To nFondos, 1 To nMeses + 1)
+    ReDim salida(1 To nFondos, 1 To nMeses + 2)
 
     Dim k As Variant
     Dim nombresEnOrden() As String
@@ -473,30 +452,36 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
         fila = idx + 1
         Dim nombre As String: nombre = nombresEnOrden(idx)
         salida(fila, 1) = nombre
+        If dicOrigen.Exists(nombre) Then
+            salida(fila, 2) = dicOrigen(nombre)
+        Else
+            salida(fila, 2) = ""
+        End If
         Dim dicMes As Object: Set dicMes = dicFondos(nombre)
         For m = 0 To nMeses - 1
             Dim clave As String: clave = CStr(mesesOrdenados(m))
             If dicMes.Exists(clave) Then
-                salida(fila, m + 2) = dicMes(clave)(idxMetrica)
+                salida(fila, m + 3) = dicMes(clave)(idxMetrica)
             Else
-                salida(fila, m + 2) = ""
+                salida(fila, m + 3) = ""
             End If
         Next m
     Next idx
 
-    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 1)).Value = salida
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 2)).Value = salida
     ws.Rows(1).Font.Bold = True
     ws.Columns(1).AutoFit
+    ws.Columns(2).AutoFit
 End Sub
 
 ' ============================================================
-'  ESCRIBIR BASE ANUAL POR FONDO (suma de meses por año)
-'  idxMetrica: CC=0, DD=1, NAV=2
-'  Una fila por fondo, una columna por año.
+'  ESCRIBIR BASE ANUAL POR FONDO (suma de meses por año) con Origen
+'  Fondo | Origen | año1 | año2 | ...
 ' ============================================================
 Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
                               ByVal idxMetrica As Long, _
-                              dicFondos As Object, ordenFondos As Object)
+                              dicFondos As Object, ordenFondos As Object, _
+                              dicOrigen As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -508,7 +493,7 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
         ws.Cells.Clear
     End If
 
-    ' 1) Recolectar todos los años presentes (set global)
+    ' Recolectar todos los años presentes
     Dim dicAnios As Object: Set dicAnios = CreateObject("Scripting.Dictionary")
     Dim nombre As Variant, dicMes As Object, k As Variant
     For Each nombre In dicFondos.Keys
@@ -522,21 +507,20 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
     Dim aniosOrden As Variant: aniosOrden = OrdenarClaves(dicAnios)
     Dim nAnios As Long: nAnios = dicAnios.Count
 
-    ' 2) Encabezados: Fondo | año1 | año2 | ...
+    ' Encabezados: Fondo | Origen | años...
     ws.Cells(1, 1).Value = "Fondo"
+    ws.Cells(1, 2).Value = "Origen"
     Dim j As Long
     For j = 0 To nAnios - 1
-        ws.Cells(1, 2 + j).Value = CStr(aniosOrden(j))
+        ws.Cells(1, 3 + j).Value = CStr(aniosOrden(j))
     Next j
 
     Dim nFondos As Long: nFondos = dicFondos.Count
     If nFondos = 0 Then Exit Sub
 
-    ' 3) Construir matriz de salida en memoria
     Dim salida() As Variant
-    ReDim salida(1 To nFondos, 1 To nAnios + 1)
+    ReDim salida(1 To nFondos, 1 To nAnios + 2)
 
-    ' Orden de fondos según aparición
     Dim nombresEnOrden() As String
     ReDim nombresEnOrden(0 To nFondos - 1)
     For Each k In ordenFondos.Keys
@@ -548,9 +532,13 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
         fila = idx + 1
         Dim nom As String: nom = nombresEnOrden(idx)
         salida(fila, 1) = nom
+        If dicOrigen.Exists(nom) Then
+            salida(fila, 2) = dicOrigen(nom)
+        Else
+            salida(fila, 2) = ""
+        End If
         Set dicMes = dicFondos(nom)
 
-        ' Sumar por año para este fondo
         Dim sumaAnio As Object: Set sumaAnio = CreateObject("Scripting.Dictionary")
         For Each k In dicMes.Keys
             Dim a As String: a = Left(CStr(k), 4)
@@ -562,26 +550,26 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
             End If
         Next k
 
-        ' Volcar a las columnas en el orden de años
         For j = 0 To nAnios - 1
             Dim ay As String: ay = CStr(aniosOrden(j))
             If sumaAnio.Exists(ay) Then
-                salida(fila, j + 2) = sumaAnio(ay)
+                salida(fila, j + 3) = sumaAnio(ay)
             Else
-                salida(fila, j + 2) = ""
+                salida(fila, j + 3) = ""
             End If
         Next j
     Next idx
 
-    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 1)).Value = salida
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 2)).Value = salida
     ws.Rows(1).Font.Bold = True
     ws.Columns(1).AutoFit
+    ws.Columns(2).AutoFit
 End Sub
 
 ' ============================================================
-'  CONSOLIDADO ANUAL + 3 GRÁFICOS DE BARRAS
+'  CONSOLIDADO ANUAL + GRÁFICOS (combinado + separados por origen)
 ' ============================================================
-Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
+Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object, dicOrigen As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets("Consolidado_Anual")
@@ -595,58 +583,111 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
         For Each chDel In ws.ChartObjects: chDel.Delete: Next chDel
     End If
 
-    ' Sumar por año (todos los fondos): clave=año -> Array(sumCC, sumDD, sumNAV)
-    Dim dicAnual As Object: Set dicAnual = CreateObject("Scripting.Dictionary")
+    ' Acumular por año y por grupo: "TOTAL", "Local", "Extranjero"
+    ' dicGrupo(grupo) -> dicAnual(año) -> Array(sumCC, sumDD, sumNAV)
+    Dim dicGrupo As Object: Set dicGrupo = CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "TOTAL", CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "Local", CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "Extranjero", CreateObject("Scripting.Dictionary")
+
+    Dim dicAniosGlobal As Object: Set dicAniosGlobal = CreateObject("Scripting.Dictionary")
 
     Dim nombre As Variant, dicMes As Object, k As Variant
     For Each nombre In dicFondos.Keys
         Set dicMes = dicFondos(nombre)
+        Dim org As String
+        If dicOrigen.Exists(nombre) Then org = CStr(dicOrigen(nombre)) Else org = ""
+
         For Each k In dicMes.Keys
             Dim anio As String: anio = Left(CStr(k), 4)
+            If Not dicAniosGlobal.Exists(anio) Then dicAniosGlobal.Add anio, True
             Dim arr As Variant: arr = dicMes(k)
-            Dim acum As Variant
-            If dicAnual.Exists(anio) Then
-                acum = dicAnual(anio)
-            Else
-                acum = Array(0#, 0#, 0#)
+
+            ' Acumular en TOTAL
+            AcumularGrupo dicGrupo("TOTAL"), anio, arr
+            ' Acumular en el grupo de origen (si está definido)
+            If org = "Local" Or org = "Extranjero" Then
+                AcumularGrupo dicGrupo(org), anio, arr
             End If
-            acum(0) = acum(0) + arr(0)
-            acum(1) = acum(1) + arr(1)
-            acum(2) = acum(2) + arr(2)
-            dicAnual(anio) = acum
         Next k
     Next nombre
 
-    Dim anios As Variant: anios = OrdenarClaves(dicAnual)
-    Dim nA As Long: nA = dicAnual.Count
+    Dim anios As Variant: anios = OrdenarClaves(dicAniosGlobal)
+    Dim nA As Long: nA = dicAniosGlobal.Count
     If nA = 0 Then Exit Sub
 
-    ws.Cells(1, 1).Value = "Año"
-    ws.Cells(1, 2).Value = "Suma CC"
-    ws.Cells(1, 3).Value = "Suma DD"
-    ws.Cells(1, 4).Value = "Suma NAV"
+    ' --- Escribir tres tablas (TOTAL, Local, Extranjero) y sus gráficos ---
+    Dim filaBase As Long: filaBase = 1
+    EscribirBloqueConsolidado ws, "TOTAL", dicGrupo("TOTAL"), anios, nA, filaBase
+    filaBase = filaBase + nA + 16   ' espacio para tabla + 3 gráficos
 
-    ' Forzar columna A (años) como texto para que el gráfico los use como categorías
-    ws.Columns(1).NumberFormat = "@"
+    EscribirBloqueConsolidado ws, "Local", dicGrupo("Local"), anios, nA, filaBase
+    filaBase = filaBase + nA + 16
+
+    EscribirBloqueConsolidado ws, "Extranjero", dicGrupo("Extranjero"), anios, nA, filaBase
+
+    ws.Columns("A:D").AutoFit
+End Sub
+
+' Acumula un registro (Array CC,DD,NAV) en un dicAnual por año
+Private Sub AcumularGrupo(dicAnual As Object, ByVal anio As String, arr As Variant)
+    Dim acum As Variant
+    If dicAnual.Exists(anio) Then
+        acum = dicAnual(anio)
+    Else
+        acum = Array(0#, 0#, 0#)
+    End If
+    acum(0) = acum(0) + arr(0)
+    acum(1) = acum(1) + arr(1)
+    acum(2) = acum(2) + arr(2)
+    dicAnual(anio) = acum
+End Sub
+
+' Escribe una tabla (Año|CC|DD|NAV) para un grupo y sus 3 gráficos
+Private Sub EscribirBloqueConsolidado(ws As Worksheet, ByVal grupo As String, _
+                                      dicAnual As Object, anios As Variant, _
+                                      ByVal nA As Long, ByVal filaBase As Long)
+    ' Título del grupo
+    ws.Cells(filaBase, 1).Value = "Consolidado: " & grupo
+    ws.Cells(filaBase, 1).Font.Bold = True
+
+    Dim filaHdr As Long: filaHdr = filaBase + 1
+    ws.Cells(filaHdr, 1).Value = "Año"
+    ws.Cells(filaHdr, 2).Value = "Suma CC"
+    ws.Cells(filaHdr, 3).Value = "Suma DD"
+    ws.Cells(filaHdr, 4).Value = "Suma NAV"
+    ws.Range(ws.Cells(filaHdr, 1), ws.Cells(filaHdr, 4)).Font.Bold = True
+
+    ' Forzar la columna de años como texto (en este bloque)
+    ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaHdr + nA, 1)).NumberFormat = "@"
 
     Dim i As Long
     For i = 0 To nA - 1
         Dim a As String: a = CStr(anios(i))
-        ws.Cells(2 + i, 1).Value = a
-        ws.Cells(2 + i, 2).Value = dicAnual(a)(0)
-        ws.Cells(2 + i, 3).Value = dicAnual(a)(1)
-        ws.Cells(2 + i, 4).Value = dicAnual(a)(2)
+        Dim valArr As Variant
+        If dicAnual.Exists(a) Then
+            valArr = dicAnual(a)
+        Else
+            valArr = Array(0#, 0#, 0#)
+        End If
+        ws.Cells(filaHdr + 1 + i, 1).Value = a
+        ws.Cells(filaHdr + 1 + i, 2).Value = valArr(0)
+        ws.Cells(filaHdr + 1 + i, 3).Value = valArr(1)
+        ws.Cells(filaHdr + 1 + i, 4).Value = valArr(2)
     Next i
-    ws.Range("A1:D1").Font.Bold = True
-    ws.Columns("A:D").AutoFit
 
-    Dim filaUlt As Long: filaUlt = 1 + nA
-    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(2, 2), ws.Cells(filaUlt, 2)), 8, 6, "Suma CC por Año"
-    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(2, 3), ws.Cells(filaUlt, 3)), 8, 14, "Suma DD por Año"
-    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(2, 4), ws.Cells(filaUlt, 4)), 8, 22, "Suma NAV por Año"
+    Dim filaUlt As Long: filaUlt = filaHdr + nA
+    Dim filaGraf As Long: filaGraf = filaHdr   ' alinear gráficos con la tabla
+
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 2), ws.Cells(filaUlt, 2)), _
+                 filaGraf, 6, "CC por Año - " & grupo
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 3), ws.Cells(filaUlt, 3)), _
+                 filaGraf, 14, "DD por Año - " & grupo
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 4), ws.Cells(filaUlt, 4)), _
+                 filaGraf, 22, "NAV por Año - " & grupo
 End Sub
 
 Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
@@ -662,22 +703,20 @@ Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
     Set ch = co.Chart
     ch.ChartType = xlColumnClustered
 
-    ' Limpiar series automáticas y construir una sola serie controlada
     Do While ch.SeriesCollection.Count > 0
         ch.SeriesCollection(1).Delete
     Loop
 
     Dim s As Series
     Set s = ch.SeriesCollection.NewSeries
-    s.Values = rngVal                        ' valores (sin encabezado)
-    s.XValues = rngCat                       ' AÑOS como etiquetas del eje X
+    s.Values = rngVal
+    s.XValues = rngCat
     s.Name = titulo
 
     ch.HasTitle = True
     ch.ChartTitle.Text = titulo
     ch.HasLegend = False
 
-    ' Forzar que el eje X sea de categorías (texto), no numérico
     On Error Resume Next
     ch.Axes(xlCategory).CategoryType = xlCategoryScale
     On Error GoTo 0
