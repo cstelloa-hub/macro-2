@@ -66,13 +66,18 @@ Sub GenerarBasesLimpias()
     If loAbriYo Then wbMarcas.Close SaveChanges:=False
     Set wbMarcas = Nothing
 
-    ' --- Construir las 3 hojas de base limpia ---
+    ' --- Bases madre mensuales (fondo x meses) ---
     Dim mesesOrdenados As Variant
     mesesOrdenados = OrdenarClaves(dicMeses)
 
     EscribirHojaMetrica wbDest, "Base_CC", 0, dicFondos, ordenFondos, mesesOrdenados
     EscribirHojaMetrica wbDest, "Base_DD", 1, dicFondos, ordenFondos, mesesOrdenados
     EscribirHojaMetrica wbDest, "Base_NAV", 2, dicFondos, ordenFondos, mesesOrdenados
+
+    ' --- Bases anuales por fondo (suma de meses por año) ---
+    EscribirHojaAnual wbDest, "Anual_CC", 0, dicFondos, ordenFondos
+    EscribirHojaAnual wbDest, "Anual_DD", 1, dicFondos, ordenFondos
+    EscribirHojaAnual wbDest, "Anual_NAV", 2, dicFondos, ordenFondos
 
     ' --- Consolidado anual + gráficos ---
     GenerarConsolidadoAnual wbDest, dicFondos
@@ -419,7 +424,8 @@ Private Function OrdenarClaves(dic As Object) As Variant
 End Function
 
 ' ============================================================
-'  ESCRIBIR HOJA DE UNA MÉTRICA (CC=0, DD=1, NAV=2)
+'  ESCRIBIR HOJA DE UNA MÉTRICA MENSUAL (CC=0, DD=1, NAV=2)
+'  Una fila por fondo, una columna por mes "AAAA-MM"
 ' ============================================================
 Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
                                 ByVal idxMetrica As Long, _
@@ -484,6 +490,95 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
 End Sub
 
 ' ============================================================
+'  ESCRIBIR BASE ANUAL POR FONDO (suma de meses por año)
+'  idxMetrica: CC=0, DD=1, NAV=2
+'  Una fila por fondo, una columna por año.
+' ============================================================
+Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
+                              ByVal idxMetrica As Long, _
+                              dicFondos As Object, ordenFondos As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = nombreHoja
+    Else
+        ws.Cells.Clear
+    End If
+
+    ' 1) Recolectar todos los años presentes (set global)
+    Dim dicAnios As Object: Set dicAnios = CreateObject("Scripting.Dictionary")
+    Dim nombre As Variant, dicMes As Object, k As Variant
+    For Each nombre In dicFondos.Keys
+        Set dicMes = dicFondos(nombre)
+        For Each k In dicMes.Keys
+            Dim anio As String: anio = Left(CStr(k), 4)
+            If Not dicAnios.Exists(anio) Then dicAnios.Add anio, True
+        Next k
+    Next nombre
+
+    Dim aniosOrden As Variant: aniosOrden = OrdenarClaves(dicAnios)
+    Dim nAnios As Long: nAnios = dicAnios.Count
+
+    ' 2) Encabezados: Fondo | año1 | año2 | ...
+    ws.Cells(1, 1).Value = "Fondo"
+    Dim j As Long
+    For j = 0 To nAnios - 1
+        ws.Cells(1, 2 + j).Value = CStr(aniosOrden(j))
+    Next j
+
+    Dim nFondos As Long: nFondos = dicFondos.Count
+    If nFondos = 0 Then Exit Sub
+
+    ' 3) Construir matriz de salida en memoria
+    Dim salida() As Variant
+    ReDim salida(1 To nFondos, 1 To nAnios + 1)
+
+    ' Orden de fondos según aparición
+    Dim nombresEnOrden() As String
+    ReDim nombresEnOrden(0 To nFondos - 1)
+    For Each k In ordenFondos.Keys
+        nombresEnOrden(ordenFondos(k)) = CStr(k)
+    Next k
+
+    Dim idx As Long, fila As Long
+    For idx = 0 To nFondos - 1
+        fila = idx + 1
+        Dim nom As String: nom = nombresEnOrden(idx)
+        salida(fila, 1) = nom
+        Set dicMes = dicFondos(nom)
+
+        ' Sumar por año para este fondo
+        Dim sumaAnio As Object: Set sumaAnio = CreateObject("Scripting.Dictionary")
+        For Each k In dicMes.Keys
+            Dim a As String: a = Left(CStr(k), 4)
+            Dim val As Double: val = dicMes(k)(idxMetrica)
+            If sumaAnio.Exists(a) Then
+                sumaAnio(a) = sumaAnio(a) + val
+            Else
+                sumaAnio.Add a, val
+            End If
+        Next k
+
+        ' Volcar a las columnas en el orden de años
+        For j = 0 To nAnios - 1
+            Dim ay As String: ay = CStr(aniosOrden(j))
+            If sumaAnio.Exists(ay) Then
+                salida(fila, j + 2) = sumaAnio(ay)
+            Else
+                salida(fila, j + 2) = ""
+            End If
+        Next j
+    Next idx
+
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 1)).Value = salida
+    ws.Rows(1).Font.Bold = True
+    ws.Columns(1).AutoFit
+End Sub
+
+' ============================================================
 '  CONSOLIDADO ANUAL + 3 GRÁFICOS DE BARRAS
 ' ============================================================
 Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
@@ -531,6 +626,9 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
     ws.Cells(1, 3).Value = "Suma DD"
     ws.Cells(1, 4).Value = "Suma NAV"
 
+    ' Forzar columna A (años) como texto para que el gráfico los use como categorías
+    ws.Columns(1).NumberFormat = "@"
+
     Dim i As Long
     For i = 0 To nA - 1
         Dim a As String: a = CStr(anios(i))
@@ -543,12 +641,12 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
     ws.Columns("A:D").AutoFit
 
     Dim filaUlt As Long: filaUlt = 1 + nA
-    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(1, 2), ws.Cells(filaUlt, 2)), 8, 6, "Suma CC por Año"
-    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(1, 3), ws.Cells(filaUlt, 3)), 8, 14, "Suma DD por Año"
-    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
-                 ws.Range(ws.Cells(1, 4), ws.Cells(filaUlt, 4)), 8, 22, "Suma NAV por Año"
+    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(2, 2), ws.Cells(filaUlt, 2)), 8, 6, "Suma CC por Año"
+    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(2, 3), ws.Cells(filaUlt, 3)), 8, 14, "Suma DD por Año"
+    CrearGrafico ws, ws.Range(ws.Cells(2, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(2, 4), ws.Cells(filaUlt, 4)), 8, 22, "Suma NAV por Año"
 End Sub
 
 Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
@@ -559,11 +657,28 @@ Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
         Left:=ws.Cells(filaTop, colLeft).Left, _
         Top:=ws.Cells(filaTop, colLeft).Top, _
         Width:=380, Height:=240)
-    With co.Chart
-        .ChartType = xlColumnClustered
-        .SetSourceData Source:=Union(rngCat, rngVal)
-        .HasTitle = True
-        .ChartTitle.Text = titulo
-        .HasLegend = False
-    End With
+
+    Dim ch As Chart
+    Set ch = co.Chart
+    ch.ChartType = xlColumnClustered
+
+    ' Limpiar series automáticas y construir una sola serie controlada
+    Do While ch.SeriesCollection.Count > 0
+        ch.SeriesCollection(1).Delete
+    Loop
+
+    Dim s As Series
+    Set s = ch.SeriesCollection.NewSeries
+    s.Values = rngVal                        ' valores (sin encabezado)
+    s.XValues = rngCat                       ' AÑOS como etiquetas del eje X
+    s.Name = titulo
+
+    ch.HasTitle = True
+    ch.ChartTitle.Text = titulo
+    ch.HasLegend = False
+
+    ' Forzar que el eje X sea de categorías (texto), no numérico
+    On Error Resume Next
+    ch.Axes(xlCategory).CategoryType = xlCategoryScale
+    On Error GoTo 0
 End Sub
