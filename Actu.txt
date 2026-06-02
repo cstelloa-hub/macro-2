@@ -608,6 +608,7 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object, dicOrig
         For Each chDel In ws.ChartObjects: chDel.Delete: Next chDel
     End If
 
+    ' dicGrupo(grupo) -> dicAnual(año) -> Array(sumCC, sumDD, navCierre)
     Dim dicGrupo As Object: Set dicGrupo = CreateObject("Scripting.Dictionary")
     dicGrupo.Add "TOTAL", CreateObject("Scripting.Dictionary")
     dicGrupo.Add "Local", CreateObject("Scripting.Dictionary")
@@ -621,16 +622,41 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object, dicOrig
         Dim org As String
         If dicOrigen.Exists(nombre) Then org = CStr(dicOrigen(nombre)) Else org = ""
 
+        ' 1) Por este fondo: sumar CC/DD por año y hallar NAV de cierre por año
+        Dim ccAnio As Object: Set ccAnio = CreateObject("Scripting.Dictionary")
+        Dim ddAnio As Object: Set ddAnio = CreateObject("Scripting.Dictionary")
+        Dim navCierre As Object: Set navCierre = CreateObject("Scripting.Dictionary")
+        Dim mesCierre As Object: Set mesCierre = CreateObject("Scripting.Dictionary")
+
         For Each k In dicMes.Keys
             Dim anio As String: anio = Left(CStr(k), 4)
             If Not dicAniosGlobal.Exists(anio) Then dicAniosGlobal.Add anio, True
             Dim arr As Variant: arr = dicMes(k)
 
-            AcumularGrupo dicGrupo("TOTAL"), anio, arr
-            If org = "Local" Or org = "Extranjero" Then
-                AcumularGrupo dicGrupo(org), anio, arr
+            ' CC
+            If ccAnio.Exists(anio) Then ccAnio(anio) = ccAnio(anio) + arr(0) Else ccAnio.Add anio, arr(0)
+            ' DD
+            If ddAnio.Exists(anio) Then ddAnio(anio) = ddAnio(anio) + arr(1) Else ddAnio.Add anio, arr(1)
+            ' NAV cierre (mes más reciente del año)
+            If Not mesCierre.Exists(anio) Then
+                mesCierre.Add anio, CStr(k)
+                navCierre.Add anio, arr(2)
+            ElseIf CStr(k) > CStr(mesCierre(anio)) Then
+                mesCierre(anio) = CStr(k)
+                navCierre(anio) = arr(2)
             End If
         Next k
+
+        ' 2) Volcar el aporte de este fondo a TOTAL y a su grupo de origen
+        Dim ay As Variant
+        For Each ay In ccAnio.Keys
+            Dim aporte As Variant
+            aporte = Array(ccAnio(ay), ddAnio(ay), navCierre(ay))
+            AcumularGrupo dicGrupo("TOTAL"), CStr(ay), aporte
+            If org = "Local" Or org = "Extranjero" Then
+                AcumularGrupo dicGrupo(org), CStr(ay), aporte
+            End If
+        Next ay
     Next nombre
 
     Dim anios As Variant: anios = OrdenarClaves(dicAniosGlobal)
@@ -648,7 +674,6 @@ Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object, dicOrig
 
     ws.Columns("A:D").AutoFit
 End Sub
-
 Private Sub AcumularGrupo(dicAnual As Object, ByVal anio As String, arr As Variant)
     Dim acum As Variant
     If dicAnual.Exists(anio) Then
