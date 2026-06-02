@@ -1,0 +1,476 @@
+Option Explicit
+
+' ============================================================
+'  CONFIGURACIÓN
+' ============================================================
+Private Const RUTA_MARCAS As String = "C:\Ruta\Marcas.xlsx"  ' <-- AJUSTA ESTA RUTA
+Private Const FILA_ENCABEZADO_DIARIO As Long = 3              ' fila donde aparece "Día"
+
+' ============================================================
+'  MACRO PRINCIPAL
+' ============================================================
+Sub GenerarBasesLimpias()
+    Dim wbMarcas As Workbook
+    Dim wbDest As Workbook
+    Dim loAbriYo As Boolean: loAbriYo = False
+    Dim t As Double: t = Timer
+
+    Set wbDest = ThisWorkbook
+
+    ' --- Estado de aplicación ---
+    Dim oldEvents As Boolean, oldAlerts As Boolean
+    Dim oldScreen As Boolean, oldCalc As XlCalculation
+    oldEvents = Application.EnableEvents
+    oldAlerts = Application.DisplayAlerts
+    oldScreen = Application.ScreenUpdating
+    oldCalc = Application.Calculation
+
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    On Error GoTo Limpieza
+
+    ' --- Usar Marcas si ya está abierto; si no, abrirlo en solo lectura ---
+    Set wbMarcas = ObtenerLibroAbierto(RUTA_MARCAS)
+    If wbMarcas Is Nothing Then
+        Set wbMarcas = Workbooks.Open(Filename:=RUTA_MARCAS, ReadOnly:=True, UpdateLinks:=0)
+        loAbriYo = True   ' solo cerramos lo que nosotros abrimos
+    End If
+
+    ' Diccionarios maestros
+    Dim dicFondos As Object   ' clave=nombreFondo -> dic mensual
+    Dim dicMeses As Object    ' set global de meses "AAAA-MM"
+    Dim ordenFondos As Object ' clave=nombreFondo -> índice de aparición
+    Set dicFondos = CreateObject("Scripting.Dictionary")
+    Set dicMeses = CreateObject("Scripting.Dictionary")
+    Set ordenFondos = CreateObject("Scripting.Dictionary")
+
+    ProcesarHoja wbMarcas, "1", dicFondos, dicMeses, ordenFondos
+    ProcesarHoja wbMarcas, "2", dicFondos, dicMeses, ordenFondos
+
+    ' Solo cerrar si la macro fue quien lo abrió; si ya estaba abierto, lo dejamos
+    If loAbriYo Then wbMarcas.Close SaveChanges:=False
+    Set wbMarcas = Nothing
+
+    ' --- Construir las 3 hojas de base limpia ---
+    Dim mesesOrdenados As Variant
+    mesesOrdenados = OrdenarClaves(dicMeses)
+
+    EscribirHojaMetrica wbDest, "Base_CC", 0, dicFondos, ordenFondos, mesesOrdenados
+    EscribirHojaMetrica wbDest, "Base_DD", 1, dicFondos, ordenFondos, mesesOrdenados
+    EscribirHojaMetrica wbDest, "Base_NAV", 2, dicFondos, ordenFondos, mesesOrdenados
+
+    ' --- Consolidado anual + gráficos ---
+    GenerarConsolidadoAnual wbDest, dicFondos
+
+    MsgBox "Listo en " & Format(Timer - t, "0.0") & " seg." & vbCrLf & _
+           dicFondos.Count & " fondos procesados.", vbInformation
+
+Limpieza:
+    If Err.Number <> 0 Then
+        MsgBox "Error " & Err.Number & ": " & Err.Description, vbExclamation
+    End If
+    On Error Resume Next
+    If Not wbMarcas Is Nothing Then
+        If loAbriYo Then wbMarcas.Close SaveChanges:=False
+    End If
+    Application.EnableEvents = oldEvents
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+    Application.Calculation = oldCalc
+End Sub
+
+' ============================================================
+'  PROCESAR UNA HOJA (detección de fondos y segundo bloque)
+' ============================================================
+Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
+                         dicFondos As Object, dicMeses As Object, ordenFondos As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub  ' la hoja puede no existir
+
+    ' Leer toda la hoja a un array en memoria
+    Dim ur As Range
+    Set ur = ws.UsedRange
+    Dim datos As Variant
+    datos = ur.Value
+    If IsEmpty(datos) Then Exit Sub
+
+    ' Si UsedRange es una sola celda, .Value no es array -> proteger
+    If Not IsArray(datos) Then Exit Sub
+
+    Dim nFilas As Long, nCols As Long
+    nFilas = UBound(datos, 1)
+    nCols = UBound(datos, 2)
+    If nFilas < FILA_ENCABEZADO_DIARIO Then Exit Sub
+
+    ' --- Detectar columnas de inicio de cada fondo: "Día"/"Dia" en fila 3 ---
+    Dim colsInicio() As Long
+    Dim nFondos As Long: nFondos = 0
+    ReDim colsInicio(1 To nCols)
+
+    Dim c As Long, v As String
+    For c = 1 To nCols
+        v = LCase(Trim(CStr(datos(FILA_ENCABEZADO_DIARIO, c) & "")))
+        If v = "día" Or v = "dia" Then
+            nFondos = nFondos + 1
+            colsInicio(nFondos) = c
+        End If
+    Next c
+    If nFondos = 0 Then Exit Sub
+
+    ' --- Procesar cada fondo ---
+    Dim f As Long, colIni As Long, colFin As Long
+    For f = 1 To nFondos
+        colIni = colsInicio(f)
+        If f < nFondos Then
+            colFin = colsInicio(f + 1) - 1
+        Else
+            colFin = nCols
+        End If
+
+        Dim nombreFondo As String
+        nombreFondo = Trim(CStr(datos(1, colIni) & ""))
+        If Len(nombreFondo) = 0 Then nombreFondo = "Fondo_col" & colIni
+
+        ProcesarFondo datos, nFilas, colIni, colFin, nombreFondo, _
+                      dicFondos, dicMeses, ordenFondos
+    Next f
+End Sub
+
+' ============================================================
+'  PROCESAR UN FONDO: localizar segundo bloque y extraer meses
+' ============================================================
+Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
+                          ByVal colIni As Long, ByVal colFin As Long, _
+                          ByVal nombreFondo As String, _
+                          dicFondos As Object, dicMeses As Object, ordenFondos As Object)
+
+    ' 1) Buscar fila donde inicia el segundo bloque (encabezados F1/CC/DD/NAV/%)
+    Dim filaHdr As Long: filaHdr = 0
+    Dim r As Long
+    For r = FILA_ENCABEZADO_DIARIO + 1 To nFilas
+        If EsInicioSegundoBloque(CStr(datos(r, colIni) & "")) Then
+            filaHdr = r
+            Exit For
+        End If
+    Next r
+    If filaHdr = 0 Then Exit Sub  ' este fondo no tiene segundo bloque
+
+    ' 2) Mapear columnas del segundo bloque por encabezado
+    Dim colCC As Long, colDD As Long, colNAV As Long
+    colCC = 0: colDD = 0: colNAV = 0
+    Dim c As Long, h As String
+    For c = colIni To colFin
+        h = UCase(Trim(CStr(datos(filaHdr, c) & "")))
+        Select Case h
+            Case "CC": colCC = c
+            Case "DD": colDD = c
+            Case "NAV": colNAV = c
+        End Select
+    Next c
+    If colNAV = 0 Then Exit Sub  ' sin NAV no hay nada que consolidar
+
+    ' 3) Diccionario mensual de este fondo
+    Dim dicMes As Object
+    If dicFondos.Exists(nombreFondo) Then
+        Set dicMes = dicFondos(nombreFondo)
+    Else
+        Set dicMes = CreateObject("Scripting.Dictionary")
+        dicFondos.Add nombreFondo, dicMes
+        ordenFondos.Add nombreFondo, ordenFondos.Count
+    End If
+
+    ' 4) Recorrer filas de datos del segundo bloque
+    '    Ajuste va DEBAJO del original:
+    '    -> último NAV manda; CC/DD se conservan del primer registro del mes.
+    Dim clave As String, valFecha As Variant
+    Dim cc As Double, dd As Double, nav As Double
+    Dim arr As Variant
+
+    For r = filaHdr + 1 To nFilas
+        valFecha = datos(r, colIni)
+
+        ' Fila vacía o texto vacío -> fin del segundo bloque
+        If IsEmpty(valFecha) Or Trim(CStr(valFecha & "")) = "" Then
+            Exit For
+        End If
+
+        ' Parsear fecha (real o texto mmm-aa). Si no es fecha -> fin del bloque
+        clave = ParsearMesAnio(valFecha)
+        If clave = "" Then Exit For
+
+        cc = LeerNumero(datos, r, colCC)
+        dd = LeerNumero(datos, r, colDD)
+        nav = LeerNumero(datos, r, colNAV)
+
+        If dicMes.Exists(clave) Then
+            ' Ajuste mismo mes: conservar CC/DD originales, actualizar NAV
+            arr = dicMes(clave)
+            arr(2) = nav
+            dicMes(clave) = arr
+        Else
+            dicMes.Add clave, Array(cc, dd, nav)
+        End If
+
+        If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
+    Next r
+End Sub
+
+' ============================================================
+'  FUNCIONES AUXILIARES
+' ============================================================
+Private Function EsInicioSegundoBloque(ByVal s As String) As Boolean
+    s = UCase(Trim(s))
+    EsInicioSegundoBloque = (s = "F1" Or s = "F2" Or s = "F3" Or _
+                             s = "CC" Or s = "DD" Or s = "NAV" Or s = "%")
+End Function
+
+Private Function LeerNumero(datos As Variant, ByVal r As Long, ByVal c As Long) As Double
+    If c = 0 Then LeerNumero = 0: Exit Function
+    Dim v As Variant: v = datos(r, c)
+    If IsNumeric(v) Then LeerNumero = CDbl(v) Else LeerNumero = 0
+End Function
+
+' Devuelve el workbook si ya está abierto (por nombre de archivo), o Nothing
+Private Function ObtenerLibroAbierto(ByVal rutaCompleta As String) As Workbook
+    Dim soloNombre As String
+    soloNombre = Mid(rutaCompleta, InStrRev(rutaCompleta, "\") + 1)
+
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If StrComp(wb.Name, soloNombre, vbTextCompare) = 0 Then
+            Set ObtenerLibroAbierto = wb
+            Exit Function
+        End If
+    Next wb
+    Set ObtenerLibroAbierto = Nothing
+End Function
+
+' Parsear fecha mmm-aa (fecha real O texto en español). Devuelve "yyyy-mm" o "".
+Private Function ParsearMesAnio(ByVal v As Variant) As String
+    ParsearMesAnio = ""
+
+    ' Caso 1: ya es fecha real (FIN.MES devuelve fecha)
+    If IsDate(v) Then
+        ParsearMesAnio = Format(CDate(v), "yyyy-mm")
+        Exit Function
+    End If
+
+    ' Caso 2: texto "ene-26", "Dic-25", "ene 26", "ene/26"
+    Dim s As String
+    s = LCase(Trim(CStr(v & "")))
+    If Len(s) = 0 Then Exit Function
+
+    s = Replace(s, ".", "")
+    s = Replace(s, "/", "-")
+    s = Replace(s, " ", "-")
+
+    Dim partes() As String
+    partes = Split(s, "-")
+    If UBound(partes) < 1 Then Exit Function
+
+    Dim mesTxt As String, anioTxt As String
+    mesTxt = Trim(partes(0))
+    anioTxt = Trim(partes(1))
+
+    Dim mm As Long: mm = 0
+    Select Case Left(mesTxt, 3)
+        Case "ene": mm = 1
+        Case "feb": mm = 2
+        Case "mar": mm = 3
+        Case "abr": mm = 4
+        Case "may": mm = 5
+        Case "jun": mm = 6
+        Case "jul": mm = 7
+        Case "ago": mm = 8
+        Case "sep", "set": mm = 9
+        Case "oct": mm = 10
+        Case "nov": mm = 11
+        Case "dic": mm = 12
+    End Select
+    If mm = 0 Then Exit Function
+
+    If Not IsNumeric(anioTxt) Then Exit Function
+    Dim yy As Long: yy = CLng(anioTxt)
+    If yy < 100 Then yy = 2000 + yy
+
+    ParsearMesAnio = Format(yy, "0000") & "-" & Format(mm, "00")
+End Function
+
+' Ordenar claves de un diccionario como texto (sirve para "AAAA-MM" y años)
+Private Function OrdenarClaves(dic As Object) As Variant
+    Dim n As Long: n = dic.Count
+    If n = 0 Then OrdenarClaves = Array(): Exit Function
+
+    Dim arr() As String
+    ReDim arr(0 To n - 1)
+    Dim k As Variant, i As Long: i = 0
+    For Each k In dic.Keys
+        arr(i) = CStr(k): i = i + 1
+    Next k
+
+    Dim j As Long, tmp As String
+    For i = 0 To n - 2
+        For j = 0 To n - 2 - i
+            If arr(j) > arr(j + 1) Then
+                tmp = arr(j): arr(j) = arr(j + 1): arr(j + 1) = tmp
+            End If
+        Next j
+    Next i
+    OrdenarClaves = arr
+End Function
+
+' ============================================================
+'  ESCRIBIR HOJA DE UNA MÉTRICA (CC=0, DD=1, NAV=2)
+' ============================================================
+Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
+                                ByVal idxMetrica As Long, _
+                                dicFondos As Object, ordenFondos As Object, _
+                                mesesOrdenados As Variant)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = nombreHoja
+    Else
+        ws.Cells.Clear
+    End If
+
+    Dim nMeses As Long: nMeses = 0
+    If IsArray(mesesOrdenados) Then
+        On Error Resume Next
+        nMeses = UBound(mesesOrdenados) - LBound(mesesOrdenados) + 1
+        On Error GoTo 0
+    End If
+
+    ws.Cells(1, 1).Value = "Fondo"
+    Dim m As Long
+    For m = 0 To nMeses - 1
+        ws.Cells(1, 2 + m).Value = CStr(mesesOrdenados(m))
+    Next m
+
+    Dim nFondos As Long: nFondos = dicFondos.Count
+    If nFondos = 0 Then Exit Sub
+
+    Dim salida() As Variant
+    ReDim salida(1 To nFondos, 1 To nMeses + 1)
+
+    Dim k As Variant
+    Dim nombresEnOrden() As String
+    ReDim nombresEnOrden(0 To nFondos - 1)
+    For Each k In ordenFondos.Keys
+        nombresEnOrden(ordenFondos(k)) = CStr(k)
+    Next k
+
+    Dim idx As Long, fila As Long
+    For idx = 0 To nFondos - 1
+        fila = idx + 1
+        Dim nombre As String: nombre = nombresEnOrden(idx)
+        salida(fila, 1) = nombre
+        Dim dicMes As Object: Set dicMes = dicFondos(nombre)
+        For m = 0 To nMeses - 1
+            Dim clave As String: clave = CStr(mesesOrdenados(m))
+            If dicMes.Exists(clave) Then
+                salida(fila, m + 2) = dicMes(clave)(idxMetrica)
+            Else
+                salida(fila, m + 2) = ""
+            End If
+        Next m
+    Next idx
+
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 1)).Value = salida
+    ws.Rows(1).Font.Bold = True
+    ws.Columns(1).AutoFit
+End Sub
+
+' ============================================================
+'  CONSOLIDADO ANUAL + 3 GRÁFICOS DE BARRAS
+' ============================================================
+Private Sub GenerarConsolidadoAnual(wb As Workbook, dicFondos As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets("Consolidado_Anual")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = "Consolidado_Anual"
+    Else
+        ws.Cells.Clear
+        Dim chDel As ChartObject
+        For Each chDel In ws.ChartObjects: chDel.Delete: Next chDel
+    End If
+
+    ' Sumar por año (todos los fondos): clave=año -> Array(sumCC, sumDD, sumNAV)
+    Dim dicAnual As Object: Set dicAnual = CreateObject("Scripting.Dictionary")
+
+    Dim nombre As Variant, dicMes As Object, k As Variant
+    For Each nombre In dicFondos.Keys
+        Set dicMes = dicFondos(nombre)
+        For Each k In dicMes.Keys
+            Dim anio As String: anio = Left(CStr(k), 4)
+            Dim arr As Variant: arr = dicMes(k)
+            Dim acum As Variant
+            If dicAnual.Exists(anio) Then
+                acum = dicAnual(anio)
+            Else
+                acum = Array(0#, 0#, 0#)
+            End If
+            acum(0) = acum(0) + arr(0)
+            acum(1) = acum(1) + arr(1)
+            acum(2) = acum(2) + arr(2)
+            dicAnual(anio) = acum
+        Next k
+    Next nombre
+
+    Dim anios As Variant: anios = OrdenarClaves(dicAnual)
+    Dim nA As Long: nA = dicAnual.Count
+    If nA = 0 Then Exit Sub
+
+    ws.Cells(1, 1).Value = "Año"
+    ws.Cells(1, 2).Value = "Suma CC"
+    ws.Cells(1, 3).Value = "Suma DD"
+    ws.Cells(1, 4).Value = "Suma NAV"
+
+    Dim i As Long
+    For i = 0 To nA - 1
+        Dim a As String: a = CStr(anios(i))
+        ws.Cells(2 + i, 1).Value = a
+        ws.Cells(2 + i, 2).Value = dicAnual(a)(0)
+        ws.Cells(2 + i, 3).Value = dicAnual(a)(1)
+        ws.Cells(2 + i, 4).Value = dicAnual(a)(2)
+    Next i
+    ws.Range("A1:D1").Font.Bold = True
+    ws.Columns("A:D").AutoFit
+
+    Dim filaUlt As Long: filaUlt = 1 + nA
+    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(1, 2), ws.Cells(filaUlt, 2)), 8, 6, "Suma CC por Año"
+    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(1, 3), ws.Cells(filaUlt, 3)), 8, 14, "Suma DD por Año"
+    CrearGrafico ws, ws.Range(ws.Cells(1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(1, 4), ws.Cells(filaUlt, 4)), 8, 22, "Suma NAV por Año"
+End Sub
+
+Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
+                         ByVal filaTop As Long, ByVal colLeft As Long, _
+                         ByVal titulo As String)
+    Dim co As ChartObject
+    Set co = ws.ChartObjects.Add( _
+        Left:=ws.Cells(filaTop, colLeft).Left, _
+        Top:=ws.Cells(filaTop, colLeft).Top, _
+        Width:=380, Height:=240)
+    With co.Chart
+        .ChartType = xlColumnClustered
+        .SetSourceData Source:=Union(rngCat, rngVal)
+        .HasTitle = True
+        .ChartTitle.Text = titulo
+        .HasLegend = False
+    End With
+End Sub
