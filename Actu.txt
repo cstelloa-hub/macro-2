@@ -547,14 +547,31 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
         End If
         Set dicMes = dicFondos(nom)
 
-        Dim sumaAnio As Object: Set sumaAnio = CreateObject("Scripting.Dictionary")
+Dim sumaAnio As Object: Set sumaAnio = CreateObject("Scripting.Dictionary")
+        ' Para NAV (idx=2): guardar el cierre del año (último mes con dato).
+        ' Para CC/DD: sumar.
+        Dim mesCierre As Object
+        If idxMetrica = 2 Then Set mesCierre = CreateObject("Scripting.Dictionary")
+
         For Each k In dicMes.Keys
             Dim a As String: a = Left(CStr(k), 4)
             Dim val As Double: val = dicMes(k)(idxMetrica)
-            If sumaAnio.Exists(a) Then
-                sumaAnio(a) = sumaAnio(a) + val
+            If idxMetrica = 2 Then
+                ' NAV: quedarse con el mes más reciente del año (clave mayor = mes mayor)
+                If Not mesCierre.Exists(a) Then
+                    mesCierre.Add a, CStr(k)
+                    sumaAnio.Add a, val
+                ElseIf CStr(k) > CStr(mesCierre(a)) Then
+                    mesCierre(a) = CStr(k)
+                    sumaAnio(a) = val
+                End If
             Else
-                sumaAnio.Add a, val
+                ' CC / DD: sumar
+                If sumaAnio.Exists(a) Then
+                    sumaAnio(a) = sumaAnio(a) + val
+                Else
+                    sumaAnio.Add a, val
+                End If
             End If
         Next k
 
