@@ -3,8 +3,9 @@ Option Explicit
 ' ============================================================
 '  CONFIGURACIÓN
 ' ============================================================
-Private Const RUTA_MARCAS As String = "C:\Ruta\Marcas.xlsx"  ' <-- AJUSTA ESTA RUTA
-Private Const FILA_ENCABEZADO_DIARIO As Long = 3              ' fila donde aparece "Día"
+Private Const FILA_ENCABEZADO_DIARIO As Long = 3   ' fila donde aparece "Día"
+Private Const FILA_CODIGO_SBS As Long = 2          ' fila donde aparece el código SBS
+Private Const HOJA_CONFIG As String = "Fondos"     ' hoja con los fondos a procesar
 
 ' ============================================================
 '  MACRO PRINCIPAL
@@ -32,23 +33,34 @@ Sub GenerarBasesLimpias()
 
     On Error GoTo Limpieza
 
-    ' --- Usar Marcas si ya está abierto; si no, abrirlo en solo lectura ---
-    Set wbMarcas = ObtenerLibroAbierto(RUTA_MARCAS)
+    ' --- Cargar la lista de fondos deseados (hoja "Fondos") ---
+    ' dicDeseados: clave = código SBS, valor = nombre de etiqueta a mostrar
+    Dim dicDeseados As Object
+    Set dicDeseados = CargarFondosDeseados(wbDest)
+    ' Si está vacía -> procesa todos los fondos
+
+    ' --- Seleccionar el archivo Marcas con un cuadro de diálogo ---
+    Dim rutaSel As String
+    rutaSel = SeleccionarArchivo()
+    If Len(rutaSel) = 0 Then GoTo Limpieza   ' el usuario canceló
+
+    ' Si ese archivo ya está abierto, reutilizarlo; si no, abrirlo en solo lectura
+    Set wbMarcas = ObtenerLibroAbierto(rutaSel)
     If wbMarcas Is Nothing Then
-        Set wbMarcas = Workbooks.Open(Filename:=RUTA_MARCAS, ReadOnly:=True, UpdateLinks:=0)
+        Set wbMarcas = Workbooks.Open(Filename:=rutaSel, ReadOnly:=True, UpdateLinks:=0)
         loAbriYo = True   ' solo cerramos lo que nosotros abrimos
     End If
 
     ' Diccionarios maestros
-    Dim dicFondos As Object   ' clave=nombreFondo -> dic mensual
+    Dim dicFondos As Object   ' clave=etiquetaFondo -> dic mensual
     Dim dicMeses As Object    ' set global de meses "AAAA-MM"
-    Dim ordenFondos As Object ' clave=nombreFondo -> índice de aparición
+    Dim ordenFondos As Object ' clave=etiquetaFondo -> índice de aparición
     Set dicFondos = CreateObject("Scripting.Dictionary")
     Set dicMeses = CreateObject("Scripting.Dictionary")
     Set ordenFondos = CreateObject("Scripting.Dictionary")
 
-    ProcesarHoja wbMarcas, "1", dicFondos, dicMeses, ordenFondos
-    ProcesarHoja wbMarcas, "2", dicFondos, dicMeses, ordenFondos
+    ProcesarHoja wbMarcas, "1", dicFondos, dicMeses, ordenFondos, dicDeseados
+    ProcesarHoja wbMarcas, "2", dicFondos, dicMeses, ordenFondos, dicDeseados
 
     ' Solo cerrar si la macro fue quien lo abrió; si ya estaba abierto, lo dejamos
     If loAbriYo Then wbMarcas.Close SaveChanges:=False
@@ -83,10 +95,60 @@ Limpieza:
 End Sub
 
 ' ============================================================
+'  CARGAR LISTA DE FONDOS DESEADOS (hoja "Fondos")
+'  Estructura esperada en la hoja:
+'    A1 = "Nombre" | B1 = "Codigo SBS"   (encabezados, fila 1)
+'    A2 en adelante = nombre, B2 = código SBS
+'  Devuelve dic: clave = código SBS (Trim), valor = nombre
+'  Si la hoja no existe o está vacía -> devuelve dic vacío (procesa todos)
+' ============================================================
+Private Function CargarFondosDeseados(wb As Workbook) As Object
+    Dim dic As Object
+    Set dic = CreateObject("Scripting.Dictionary")
+
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(HOJA_CONFIG)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        ' Crear la hoja con encabezados para que el usuario la complete
+        Set ws = wb.Worksheets.Add(Before:=wb.Worksheets(1))
+        ws.Name = HOJA_CONFIG
+        ws.Cells(1, 1).Value = "Nombre"
+        ws.Cells(1, 2).Value = "Codigo SBS"
+        ws.Range("A1:B1").Font.Bold = True
+        ws.Columns("A:B").ColumnWidth = 22
+        Set CargarFondosDeseados = dic   ' vacío -> procesa todos
+        Exit Function
+    End If
+
+    Dim ultFila As Long
+    ultFila = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row   ' última fila con código (col B)
+    If ultFila < 2 Then
+        Set CargarFondosDeseados = dic   ' sin datos -> procesa todos
+        Exit Function
+    End If
+
+    Dim r As Long, cod As String, nom As String
+    For r = 2 To ultFila
+        cod = Trim(CStr(ws.Cells(r, 2).Value & ""))   ' código SBS como texto
+        nom = Trim(CStr(ws.Cells(r, 1).Value & ""))   ' nombre etiqueta
+        If Len(cod) > 0 Then
+            If Len(nom) = 0 Then nom = cod
+            If Not dic.Exists(cod) Then dic.Add cod, nom
+        End If
+    Next r
+
+    Set CargarFondosDeseados = dic
+End Function
+
+' ============================================================
 '  PROCESAR UNA HOJA (detección de fondos y segundo bloque)
 ' ============================================================
 Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
-                         dicFondos As Object, dicMeses As Object, ordenFondos As Object)
+                         dicFondos As Object, dicMeses As Object, ordenFondos As Object, _
+                         dicDeseados As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -99,9 +161,7 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
     Dim datos As Variant
     datos = ur.Value
     If IsEmpty(datos) Then Exit Sub
-
-    ' Si UsedRange es una sola celda, .Value no es array -> proteger
-    If Not IsArray(datos) Then Exit Sub
+    If Not IsArray(datos) Then Exit Sub   ' UsedRange de una sola celda
 
     Dim nFilas As Long, nCols As Long
     nFilas = UBound(datos, 1)
@@ -123,6 +183,9 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
     Next c
     If nFondos = 0 Then Exit Sub
 
+    Dim filtrar As Boolean
+    filtrar = (dicDeseados.Count > 0)   ' si hay lista, filtramos por código SBS
+
     ' --- Procesar cada fondo ---
     Dim f As Long, colIni As Long, colFin As Long
     For f = 1 To nFondos
@@ -133,12 +196,27 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, _
             colFin = nCols
         End If
 
+        ' Código SBS del fondo (fila 2, columna de inicio)
+        Dim codSBS As String
+        codSBS = Trim(CStr(datos(FILA_CODIGO_SBS, colIni) & ""))
+
+        ' Nombre original del fondo (fila 1)
         Dim nombreFondo As String
         nombreFondo = Trim(CStr(datos(1, colIni) & ""))
         If Len(nombreFondo) = 0 Then nombreFondo = "Fondo_col" & colIni
 
-        ProcesarFondo datos, nFilas, colIni, colFin, nombreFondo, _
+        ' Si filtramos, saltar fondos cuyo código no esté en la lista
+        Dim etiqueta As String
+        If filtrar Then
+            If Not dicDeseados.Exists(codSBS) Then GoTo SiguienteFondo
+            etiqueta = CStr(dicDeseados(codSBS))   ' usar nombre de la hoja Fondos
+        Else
+            etiqueta = nombreFondo
+        End If
+
+        ProcesarFondo datos, nFilas, colIni, colFin, etiqueta, _
                       dicFondos, dicMeses, ordenFondos
+SiguienteFondo:
     Next f
 End Sub
 
@@ -147,7 +225,7 @@ End Sub
 ' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
-                          ByVal nombreFondo As String, _
+                          ByVal etiqueta As String, _
                           dicFondos As Object, dicMeses As Object, ordenFondos As Object)
 
     ' 1) Buscar fila donde inicia el segundo bloque (encabezados F1/CC/DD/NAV/%)
@@ -177,12 +255,12 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
 
     ' 3) Diccionario mensual de este fondo
     Dim dicMes As Object
-    If dicFondos.Exists(nombreFondo) Then
-        Set dicMes = dicFondos(nombreFondo)
+    If dicFondos.Exists(etiqueta) Then
+        Set dicMes = dicFondos(etiqueta)
     Else
         Set dicMes = CreateObject("Scripting.Dictionary")
-        dicFondos.Add nombreFondo, dicMes
-        ordenFondos.Add nombreFondo, ordenFondos.Count
+        dicFondos.Add etiqueta, dicMes
+        ordenFondos.Add etiqueta, ordenFondos.Count
     End If
 
     ' 4) Recorrer filas de datos del segundo bloque
@@ -234,6 +312,21 @@ Private Function LeerNumero(datos As Variant, ByVal r As Long, ByVal c As Long) 
     If c = 0 Then LeerNumero = 0: Exit Function
     Dim v As Variant: v = datos(r, c)
     If IsNumeric(v) Then LeerNumero = CDbl(v) Else LeerNumero = 0
+End Function
+
+' Abre un cuadro de diálogo para que el usuario elija el archivo Marcas.
+Private Function SeleccionarArchivo() As String
+    SeleccionarArchivo = ""
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Seleccione el archivo Marcas"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel", "*.xlsx; *.xlsm; *.xls"
+        .Filters.Add "Todos", "*.*"
+        If .Show = -1 Then
+            SeleccionarArchivo = .SelectedItems(1)
+        End If
+    End With
 End Function
 
 ' Devuelve el workbook si ya está abierto (por nombre de archivo), o Nothing
