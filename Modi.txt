@@ -45,11 +45,10 @@ Sub GenerarBasesLimpias()
         loAbriYo = True
     End If
 
-    ' Estructura de datos:
     ' dicTipos: clave = tipo ("F1"/"F2"/"F3") -> dicFondos de ese tipo
     '   dicFondos: clave = etiquetaFondo -> dicMes (clave "yyyy-mm" -> Array(CC,DD,NAV))
     ' dicMeses: set global de meses
-    ' ordenFondos: clave = "tipo|etiqueta" -> índice (orden de aparición)
+    ' ordenFondos: clave = "tipo|etiqueta" -> índice de aparición
     ' dicOrigen: clave = etiquetaFondo -> "Local"/"Extranjero"
     Dim dicTipos As Object: Set dicTipos = CreateObject("Scripting.Dictionary")
     Dim dicMeses As Object: Set dicMeses = CreateObject("Scripting.Dictionary")
@@ -65,7 +64,6 @@ Sub GenerarBasesLimpias()
     Dim mesesOrdenados As Variant
     mesesOrdenados = OrdenarClaves(dicMeses)
 
-    ' --- Generar hojas por cada tipo presente (F1, F2, F3) ---
     Dim tiposOrden As Variant: tiposOrden = Array("F1", "F2", "F3")
     Dim it As Long
     For it = 0 To UBound(tiposOrden)
@@ -73,22 +71,26 @@ Sub GenerarBasesLimpias()
         If dicTipos.Exists(tipo) Then
             Dim dicFondosTipo As Object: Set dicFondosTipo = dicTipos(tipo)
 
-            ' Bases madre mensuales por tipo
             EscribirHojaMetrica wbDest, "Base_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
             EscribirHojaMetrica wbDest, "Base_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
             EscribirHojaMetrica wbDest, "Base_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
 
-            ' Bases anuales por tipo (CC/DD suma; NAV cierre)
             EscribirHojaAnual wbDest, "Anual_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen
             EscribirHojaAnual wbDest, "Anual_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen
             EscribirHojaAnual wbDest, "Anual_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen
 
-            ' Consolidado por tipo
             GenerarConsolidadoAnual wbDest, "Consol_" & tipo, tipo, dicFondosTipo, dicOrigen
         End If
     Next it
 
-    MsgBox "Listo en " & Format(Timer - t, "0.0") & " seg.", vbInformation
+    Dim resumen As String: resumen = ""
+    Dim tt As Variant
+    For Each tt In Array("F1", "F2", "F3")
+        If dicTipos.Exists(CStr(tt)) Then
+            resumen = resumen & CStr(tt) & ": " & dicTipos(CStr(tt)).Count & " fondos" & vbCrLf
+        End If
+    Next tt
+    MsgBox "Listo en " & Format(Timer - t, "0.0") & " seg." & vbCrLf & vbCrLf & resumen, vbInformation
 
 Limpieza:
     If Err.Number <> 0 Then
@@ -160,8 +162,22 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal orige
     On Error GoTo 0
     If ws Is Nothing Then Exit Sub
 
+    ' Calcular el rango REAL (no confiar en UsedRange, que a veces se queda corto)
+    Dim ultFilaReal As Long, ultColReal As Long
+    ultFilaReal = 1: ultColReal = 1
+    Dim cBusca As Range
+    On Error Resume Next
+    Set cBusca = ws.Cells.Find(What:="*", LookIn:=xlValues, _
+                               SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+    If Not cBusca Is Nothing Then ultFilaReal = cBusca.Row
+    Set cBusca = ws.Cells.Find(What:="*", LookIn:=xlValues, _
+                               SearchOrder:=xlByColumns, SearchDirection:=xlPrevious)
+    If Not cBusca Is Nothing Then ultColReal = cBusca.Column
+    On Error GoTo 0
+    If ultFilaReal < FILA_ENCABEZADO_DIARIO Then Exit Sub
+
     Dim datos As Variant
-    datos = ws.UsedRange.Value
+    datos = ws.Range(ws.Cells(1, 1), ws.Cells(ultFilaReal, ultColReal)).Value
     If IsEmpty(datos) Then Exit Sub
     If Not IsArray(datos) Then Exit Sub
 
@@ -170,6 +186,7 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal orige
     nCols = UBound(datos, 2)
     If nFilas < FILA_ENCABEZADO_DIARIO Then Exit Sub
 
+    ' Detectar columnas de inicio de cada fondo: "Día"/"Dia" en fila 3
     Dim colsInicio() As Long
     Dim nFondos As Long: nFondos = 0
     ReDim colsInicio(1 To nCols)
@@ -221,6 +238,8 @@ End Sub
 
 ' ============================================================
 '  PROCESAR UN FONDO: leer TODOS los sub-bloques apilados (F1/F2/F3)
+'  Tolera filas vacías impredecibles: lee hasta el siguiente
+'  encabezado F1/F2/F3 (o fin) e ignora filas sin fecha válida.
 ' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
@@ -230,12 +249,10 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
     Dim r As Long
     r = FILA_ENCABEZADO_DIARIO + 1
 
-    ' Recorrer todo el rango vertical del fondo buscando encabezados de sub-bloque
     Do While r <= nFilas
         Dim etq As String
         etq = UCase(Trim(CStr(datos(r, colIni) & "")))
 
-        ' ¿Es un encabezado de sub-bloque por tipo? (F1/F2/F3)
         If etq = "F1" Or etq = "F2" Or etq = "F3" Then
             Dim tipo As String: tipo = etq
             Dim filaHdr As Long: filaHdr = r
@@ -272,41 +289,46 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                 If Not ordenFondos.Exists(claveOrden) Then ordenFondos.Add claveOrden, ordenFondos.Count
             End If
 
-            ' Leer los meses debajo de este encabezado, hasta el próximo encabezado o fin
-            Dim rr As Long: rr = filaHdr + 1
-            Do While rr <= nFilas
-                Dim valFecha As Variant: valFecha = datos(rr, colIni)
-                Dim sFecha As String: sFecha = UCase(Trim(CStr(valFecha & "")))
-
-                ' Si aparece otro encabezado de tipo -> terminar este sub-bloque
-                If sFecha = "F1" Or sFecha = "F2" Or sFecha = "F3" Then Exit Do
-
-                ' Fila vacía -> terminar este sub-bloque
-                If IsEmpty(valFecha) Or sFecha = "" Then Exit Do
-
-                ' Parsear fecha (descarta basura 1899)
-                Dim clave As String: clave = ParsearMesAnio(valFecha)
-                If clave <> "" Then
-                    Dim cc As Double, dd As Double, nav As Double
-                    cc = LeerNumero(datos, rr, colCC)
-                    dd = LeerNumero(datos, rr, colDD)
-                    nav = LeerNumero(datos, rr, colNAV)
-
-                    If dicMes.Exists(clave) Then
-                        Dim arr As Variant: arr = dicMes(clave)
-                        arr(2) = nav            ' ajuste: último NAV manda
-                        dicMes(clave) = arr
-                    Else
-                        dicMes.Add clave, Array(cc, dd, nav)
-                    End If
-                    If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
+            ' Determinar hasta dónde llega este sub-bloque:
+            ' hasta el SIGUIENTE encabezado F1/F2/F3 en colIni, o fin del rango.
+            Dim rFin As Long: rFin = nFilas
+            Dim rBusca As Long
+            For rBusca = filaHdr + 1 To nFilas
+                Dim et2 As String: et2 = UCase(Trim(CStr(datos(rBusca, colIni) & "")))
+                If et2 = "F1" Or et2 = "F2" Or et2 = "F3" Then
+                    rFin = rBusca - 1
+                    Exit For
                 End If
-                ' Si la fecha era basura numérica, simplemente seguimos (no cortamos)
+            Next rBusca
 
-                rr = rr + 1
-            Loop
+            ' Leer TODAS las filas del sub-bloque; ignorar las que no tengan fecha válida
+            Dim rr As Long
+            For rr = filaHdr + 1 To rFin
+                Dim valFecha As Variant: valFecha = datos(rr, colIni)
 
-            r = rr   ' continuar desde donde quedó (el próximo encabezado o fin)
+                If IsEmpty(valFecha) Then GoTo SigFila
+                If Trim(CStr(valFecha & "")) = "" Then GoTo SigFila
+
+                Dim clave As String: clave = ParsearMesAnio(valFecha)
+                If clave = "" Then GoTo SigFila   ' no es mes válido -> ignorar
+
+                Dim cc As Double, dd As Double, nav As Double
+                cc = LeerNumero(datos, rr, colCC)
+                dd = LeerNumero(datos, rr, colDD)
+                nav = LeerNumero(datos, rr, colNAV)
+
+                If dicMes.Exists(clave) Then
+                    Dim arr As Variant: arr = dicMes(clave)
+                    arr(2) = nav            ' ajuste: último NAV manda
+                    dicMes(clave) = arr
+                Else
+                    dicMes.Add clave, Array(cc, dd, nav)
+                End If
+                If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
+SigFila:
+            Next rr
+
+            r = rFin + 1
         Else
             r = r + 1
         End If
@@ -425,12 +447,10 @@ Private Function OrdenarClaves(dic As Object) As Variant
     OrdenarClaves = arr
 End Function
 
-' Devuelve los fondos de un tipo en orden de aparición
 Private Function FondosEnOrden(dicFondosTipo As Object, ordenFondos As Object, ByVal tipo As String) As Variant
     Dim n As Long: n = dicFondosTipo.Count
     If n = 0 Then FondosEnOrden = Array(): Exit Function
 
-    ' Recolectar (orden, nombre) y ordenar por índice
     Dim nombres() As String, ordenes() As Long
     ReDim nombres(0 To n - 1)
     ReDim ordenes(0 To n - 1)
@@ -438,15 +458,10 @@ Private Function FondosEnOrden(dicFondosTipo As Object, ordenFondos As Object, B
     For Each k In dicFondosTipo.Keys
         nombres(i) = CStr(k)
         Dim claveOrden As String: claveOrden = tipo & "|" & CStr(k)
-        If ordenFondos.Exists(claveOrden) Then
-            ordenes(i) = ordenFondos(claveOrden)
-        Else
-            ordenes(i) = 999999
-        End If
+        If ordenFondos.Exists(claveOrden) Then ordenes(i) = ordenFondos(claveOrden) Else ordenes(i) = 999999
         i = i + 1
     Next k
 
-    ' Ordenar por 'ordenes'
     Dim a As Long, b As Long, tmpL As Long, tmpS As String
     For a = 0 To n - 2
         For b = 0 To n - 2 - a
@@ -544,7 +559,6 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
         ws.Cells.Clear
     End If
 
-    ' Recolectar años
     Dim dicAnios As Object: Set dicAnios = CreateObject("Scripting.Dictionary")
     Dim nombre As Variant, dicMes As Object, k As Variant
     For Each nombre In dicFondosTipo.Keys
@@ -590,14 +604,12 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
             Dim a As String: a = Left(CStr(k), 4)
             Dim val As Double: val = dicMes(k)(idxMetrica)
             If idxMetrica = 2 Then
-                ' NAV: cierre (mes más reciente del año)
                 If Not mesCierre.Exists(a) Then
                     mesCierre.Add a, CStr(k): acumAnio.Add a, val
                 ElseIf CStr(k) > CStr(mesCierre(a)) Then
                     mesCierre(a) = CStr(k): acumAnio(a) = val
                 End If
             Else
-                ' CC/DD: suma
                 If acumAnio.Exists(a) Then acumAnio(a) = acumAnio(a) + val Else acumAnio.Add a, val
             End If
         Next k
@@ -616,7 +628,6 @@ End Sub
 
 ' ============================================================
 '  CONSOLIDADO ANUAL DE UN TIPO + GRÁFICOS (combinado + por origen)
-'  NAV = cierre del año por fondo, sumado entre fondos
 ' ============================================================
 Private Sub GenerarConsolidadoAnual(wb As Workbook, ByVal nombreHoja As String, ByVal tipo As String, _
                                     dicFondosTipo As Object, dicOrigen As Object)
