@@ -1,0 +1,81 @@
+Sub DiagnosticoFondos()
+    Dim wbDest As Workbook: Set wbDest = ThisWorkbook
+    Dim dicDeseados As Object: Set dicDeseados = CreateObject("Scripting.Dictionary")
+
+    ' Cargar códigos de la hoja Fondos (normalizados)
+    Dim wsF As Worksheet
+    On Error Resume Next
+    Set wsF = wbDest.Worksheets("Fondos")
+    On Error GoTo 0
+    If wsF Is Nothing Then MsgBox "No existe hoja Fondos": Exit Sub
+
+    Dim ultF As Long: ultF = wsF.Cells(wsF.Rows.Count, 2).End(xlUp).Row
+    Dim r As Long
+    For r = 2 To ultF
+        Dim cod As String: cod = NormalizarSBS(CStr(wsF.Cells(r, 2).Value & ""))
+        If Len(cod) > 0 Then If Not dicDeseados.Exists(cod) Then dicDeseados.Add cod, wsF.Cells(r, 1).Value
+    Next r
+
+    ' Seleccionar Marcas
+    Dim ruta As String
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Seleccione Marcas": .AllowMultiSelect = False
+        If .Show <> -1 Then Exit Sub
+        ruta = .SelectedItems(1)
+    End With
+    Dim soloNombre As String: soloNombre = Mid(ruta, InStrRev(ruta, "\") + 1)
+    Dim wb As Workbook, loAbri As Boolean, w As Workbook
+    For Each w In Application.Workbooks
+        If StrComp(w.Name, soloNombre, vbTextCompare) = 0 Then Set wb = w
+    Next w
+    If wb Is Nothing Then Set wb = Workbooks.Open(ruta, ReadOnly:=True, UpdateLinks:=0): loAbri = True
+
+    ' Recolectar todos los códigos que SÍ se detectan en Marcas
+    Dim dicEncontrados As Object: Set dicEncontrados = CreateObject("Scripting.Dictionary")
+    Dim hoja As Variant
+    For Each hoja In Array("1", "2")
+        Dim ws As Worksheet: Set ws = Nothing
+        On Error Resume Next
+        Set ws = wb.Worksheets(CStr(hoja))
+        On Error GoTo 0
+        If Not ws Is Nothing Then
+            Dim datos As Variant: datos = ws.UsedRange.Value
+            If IsArray(datos) Then
+                Dim nF As Long, nC As Long, c As Long
+                nF = UBound(datos, 1): nC = UBound(datos, 2)
+                For c = 1 To nC
+                    Dim v As String: v = LCase(Trim(CStr(datos(3, c) & "")))
+                    If v = "día" Or v = "dia" Then
+                        Dim codM As String: codM = NormalizarSBS(CStr(datos(2, c) & ""))
+                        If Len(codM) > 0 Then
+                            If Not dicEncontrados.Exists(codM) Then dicEncontrados.Add codM, "Hoja " & hoja & " col " & c
+                        End If
+                    End If
+                Next c
+            End If
+        End If
+    Next hoja
+    If loAbri Then wb.Close SaveChanges:=False
+
+    ' Comparar: cuáles de mi lista NO se detectaron
+    Dim faltan As String, ok As Long
+    Dim k As Variant
+    For Each k In dicDeseados.Keys
+        If dicEncontrados.Exists(k) Then
+            ok = ok + 1
+        Else
+            faltan = faltan & "- " & dicDeseados(k) & "  [" & k & "]" & vbCrLf
+        End If
+    Next k
+
+    Dim msg As String
+    msg = "Códigos en hoja Fondos: " & dicDeseados.Count & vbCrLf
+    msg = msg & "Detectados en Marcas: " & ok & vbCrLf
+    msg = msg & "Bloques con 'Día' totales en Marcas: " & dicEncontrados.Count & vbCrLf & vbCrLf
+    If Len(faltan) > 0 Then
+        msg = msg & "NO detectados (revisar):" & vbCrLf & faltan
+    Else
+        msg = msg & "Todos los códigos de tu lista fueron detectados."
+    End If
+    MsgBox msg, vbInformation, "Diagnóstico Fondos"
+End Sub
