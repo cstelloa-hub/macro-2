@@ -243,8 +243,12 @@ End Sub
 
 ' ============================================================
 '  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
-'  Toma toda fila con fecha valida. Ignora vacios, codigo
-'  SBS y otros textos. Corta SOLO en otro F1/F2/F3 o MONEDA.
+'  Estructura confirmada del archivo real:
+'   - Fecha (fin de mes, datetime) en la columna del tipo (colIni)
+'   - Orden fijo: [tipo] CC DD NAV  -> CC=colIni+1, DD=+2, NAV=+3
+'   - Antes de cada F1/F2/F3 reaparece el codigo SBS (se ignora)
+'   - Corta el sub-bloque en otro F1/F2/F3 o en MONEDA
+'   - Ajuste mismo mes: ultimo NAV manda, CC/DD del primero
 ' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
@@ -264,19 +268,31 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             Dim filaHdr As Long
             filaHdr = r
 
+            ' Columnas por POSICION FIJA: [tipo] CC DD NAV
             Dim colCC As Long, colDD As Long, colNAV As Long
-            colCC = 0
-            colDD = 0
-            colNAV = 0
-            Dim c As Long, h As String
-            For c = colIni To colFin
-                h = UCase(Trim(CStr(datos(filaHdr, c) & "")))
-                Select Case h
-                    Case "CC": colCC = c
-                    Case "DD": colDD = c
-                    Case "NAV": colNAV = c
-                End Select
-            Next c
+            colCC = colIni + 1
+            colDD = colIni + 2
+            colNAV = colIni + 3
+
+            ' Respaldo por texto si las posiciones no calzan
+            Dim hCC As String, hDD As String, hNAV As String
+            hCC = ""
+            hDD = ""
+            hNAV = ""
+            If colCC <= colFin Then hCC = UCase(Trim(CStr(datos(filaHdr, colCC) & "")))
+            If colDD <= colFin Then hDD = UCase(Trim(CStr(datos(filaHdr, colDD) & "")))
+            If colNAV <= colFin Then hNAV = UCase(Trim(CStr(datos(filaHdr, colNAV) & "")))
+            If hCC <> "CC" Or hDD <> "DD" Or hNAV <> "NAV" Then
+                Dim cBus As Long, hBus As String
+                For cBus = colIni To colFin
+                    hBus = UCase(Trim(CStr(datos(filaHdr, cBus) & "")))
+                    Select Case hBus
+                        Case "CC": colCC = cBus
+                        Case "DD": colDD = cBus
+                        Case "NAV": colNAV = cBus
+                    End Select
+                Next cBus
+            End If
 
             Dim dicFondosTipo As Object
             If dicTipos.Exists(tipo) Then
@@ -304,11 +320,9 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                 Dim sCelda As String
                 sCelda = UCase(Trim(CStr(datos(rr, colIni) & "")))
 
-                ' Corte del sub-bloque: otro tipo o aparece MONEDA
                 If sCelda = "F1" Or sCelda = "F2" Or sCelda = "F3" Then Exit Do
                 If InStr(sCelda, "MONEDA") > 0 Then Exit Do
 
-                ' Tomar solo filas con fecha valida; ignorar el resto
                 Dim clave As String
                 clave = ParsearMesAnio(datos(rr, colIni))
                 If clave <> "" Then
