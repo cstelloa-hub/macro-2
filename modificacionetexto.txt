@@ -243,8 +243,8 @@ End Sub
 
 ' ============================================================
 '  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
-'  Cada sub-bloque termina al aparecer texto no-fecha
-'  (codigo SBS, MONEDA?, otro F1/F2/F3) o fin de hoja.
+'  Toma toda fila con fecha valida. Ignora vacios, codigo
+'  SBS y otros textos. Corta SOLO en otro F1/F2/F3 o MONEDA.
 ' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
@@ -299,22 +299,19 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
 
             Dim rr As Long
             rr = filaHdr + 1
-            Dim yaLeyoDatos As Boolean
-            yaLeyoDatos = False
 
             Do While rr <= nFilas
-                Dim valFecha As Variant
-                valFecha = datos(rr, colIni)
                 Dim sCelda As String
-                sCelda = UCase(Trim(CStr(valFecha & "")))
+                sCelda = UCase(Trim(CStr(datos(rr, colIni) & "")))
 
+                ' Corte del sub-bloque: otro tipo o aparece MONEDA
                 If sCelda = "F1" Or sCelda = "F2" Or sCelda = "F3" Then Exit Do
+                If InStr(sCelda, "MONEDA") > 0 Then Exit Do
 
+                ' Tomar solo filas con fecha valida; ignorar el resto
                 Dim clave As String
-                clave = ParsearMesAnio(valFecha)
-
+                clave = ParsearMesAnio(datos(rr, colIni))
                 If clave <> "" Then
-                    yaLeyoDatos = True
                     Dim cc As Double, dd As Double, nav As Double
                     cc = LeerNumero(datos, rr, colCC)
                     dd = LeerNumero(datos, rr, colDD)
@@ -329,12 +326,6 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                         dicMes.Add clave, Array(cc, dd, nav)
                     End If
                     If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
-                Else
-                    If sCelda = "" Then
-                        If yaLeyoDatos Then Exit Do
-                    Else
-                        Exit Do
-                    End If
                 End If
 
                 rr = rr + 1
