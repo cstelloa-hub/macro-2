@@ -1,3 +1,251 @@
+Option Explicit
+
+' ============================================================
+'  CONFIGURACION
+' ============================================================
+Private Const FILA_ENCABEZADO_DIARIO As Long = 3
+Private Const FILA_CODIGO_SBS As Long = 2
+Private Const HOJA_CONFIG As String = "Fondos"
+
+' ============================================================
+'  MACRO PRINCIPAL
+' ============================================================
+Sub GenerarBasesLimpias()
+    Dim wbMarcas As Workbook
+    Dim wbDest As Workbook
+    Dim loAbriYo As Boolean
+    loAbriYo = False
+    Dim t As Double
+    t = Timer
+
+    Set wbDest = ThisWorkbook
+
+    Dim oldEvents As Boolean, oldAlerts As Boolean
+    Dim oldScreen As Boolean, oldCalc As XlCalculation
+    oldEvents = Application.EnableEvents
+    oldAlerts = Application.DisplayAlerts
+    oldScreen = Application.ScreenUpdating
+    oldCalc = Application.Calculation
+
+    Application.EnableEvents = False
+    Application.DisplayAlerts = False
+    Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
+
+    On Error GoTo Limpieza
+
+    Dim dicDeseados As Object
+    Set dicDeseados = CargarFondosDeseados(wbDest)
+
+    Dim rutaSel As String
+    rutaSel = SeleccionarArchivo()
+    If Len(rutaSel) = 0 Then GoTo Limpieza
+
+    Set wbMarcas = ObtenerLibroAbierto(rutaSel)
+    If wbMarcas Is Nothing Then
+        Set wbMarcas = Workbooks.Open(Filename:=rutaSel, ReadOnly:=True, UpdateLinks:=0)
+        loAbriYo = True
+    End If
+
+    Dim dicTipos As Object
+    Dim dicMeses As Object
+    Dim ordenFondos As Object
+    Dim dicOrigen As Object
+    Set dicTipos = CreateObject("Scripting.Dictionary")
+    Set dicMeses = CreateObject("Scripting.Dictionary")
+    Set ordenFondos = CreateObject("Scripting.Dictionary")
+    Set dicOrigen = CreateObject("Scripting.Dictionary")
+
+    ProcesarHoja wbMarcas, "1", "Local", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen
+    ProcesarHoja wbMarcas, "2", "Extranjero", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen
+
+    If loAbriYo Then wbMarcas.Close SaveChanges:=False
+    Set wbMarcas = Nothing
+
+    Dim mesesOrdenados As Variant
+    mesesOrdenados = OrdenarClaves(dicMeses)
+
+    Dim tiposOrden As Variant
+    tiposOrden = Array("F1", "F2", "F3")
+    Dim it As Long
+    For it = 0 To UBound(tiposOrden)
+        Dim tipo As String
+        tipo = CStr(tiposOrden(it))
+        If dicTipos.Exists(tipo) Then
+            Dim dicFondosTipo As Object
+            Set dicFondosTipo = dicTipos(tipo)
+
+            EscribirHojaMetrica wbDest, "Base_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
+            EscribirHojaMetrica wbDest, "Base_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
+            EscribirHojaMetrica wbDest, "Base_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
+
+            EscribirHojaAnual wbDest, "Anual_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen
+            EscribirHojaAnual wbDest, "Anual_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen
+            EscribirHojaAnual wbDest, "Anual_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen
+
+            GenerarConsolidadoAnual wbDest, "Consol_" & tipo, tipo, dicFondosTipo, dicOrigen
+        End If
+    Next it
+
+    Dim resumen As String
+    resumen = ""
+    Dim tt As Variant
+    For Each tt In Array("F1", "F2", "F3")
+        If dicTipos.Exists(CStr(tt)) Then
+            resumen = resumen & CStr(tt) & ": " & dicTipos(CStr(tt)).Count & " fondos" & vbCrLf
+        End If
+    Next tt
+    MsgBox "Listo en " & Format(Timer - t, "0.0") & " seg." & vbCrLf & vbCrLf & resumen, vbInformation
+
+Limpieza:
+    If Err.Number <> 0 Then
+        MsgBox "Error " & Err.Number & ": " & Err.Description, vbExclamation
+    End If
+    On Error Resume Next
+    If Not wbMarcas Is Nothing Then
+        If loAbriYo Then wbMarcas.Close SaveChanges:=False
+    End If
+    Application.EnableEvents = oldEvents
+    Application.DisplayAlerts = oldAlerts
+    Application.ScreenUpdating = oldScreen
+    Application.Calculation = oldCalc
+End Sub
+
+' ============================================================
+'  CARGAR LISTA DE FONDOS DESEADOS (hoja "Fondos")
+' ============================================================
+Private Function CargarFondosDeseados(wb As Workbook) As Object
+    Dim dic As Object
+    Set dic = CreateObject("Scripting.Dictionary")
+
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(HOJA_CONFIG)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(Before:=wb.Worksheets(1))
+        ws.Name = HOJA_CONFIG
+        ws.Cells(1, 1).Value = "Nombre"
+        ws.Cells(1, 2).Value = "Codigo SBS"
+        ws.Range("A1:B1").Font.Bold = True
+        ws.Columns("A:B").ColumnWidth = 22
+        Set CargarFondosDeseados = dic
+        Exit Function
+    End If
+
+    Dim ultFila As Long
+    ultFila = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    If ultFila < 2 Then
+        Set CargarFondosDeseados = dic
+        Exit Function
+    End If
+
+    Dim r As Long, cod As String, nom As String, codNorm As String
+    For r = 2 To ultFila
+        cod = Trim(CStr(ws.Cells(r, 2).Value & ""))
+        nom = Trim(CStr(ws.Cells(r, 1).Value & ""))
+        If Len(cod) > 0 Then
+            If Len(nom) = 0 Then nom = cod
+            codNorm = NormalizarSBS(cod)
+            If Not dic.Exists(codNorm) Then dic.Add codNorm, nom
+        End If
+    Next r
+
+    Set CargarFondosDeseados = dic
+End Function
+
+' ============================================================
+'  PROCESAR UNA HOJA
+' ============================================================
+Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal origen As String, _
+                         dicTipos As Object, dicMeses As Object, ordenFondos As Object, _
+                         dicDeseados As Object, dicOrigen As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+
+    Dim ultFilaReal As Long, ultColReal As Long
+    ultFilaReal = 1
+    ultColReal = 1
+    Dim cBusca As Range
+    On Error Resume Next
+    Set cBusca = ws.Cells.Find(What:="*", LookIn:=xlValues, _
+                               SearchOrder:=xlByRows, SearchDirection:=xlPrevious)
+    If Not cBusca Is Nothing Then ultFilaReal = cBusca.Row
+    Set cBusca = ws.Cells.Find(What:="*", LookIn:=xlValues, _
+                               SearchOrder:=xlByColumns, SearchDirection:=xlPrevious)
+    If Not cBusca Is Nothing Then ultColReal = cBusca.Column
+    On Error GoTo 0
+    If ultFilaReal < FILA_ENCABEZADO_DIARIO Then Exit Sub
+
+    Dim datos As Variant
+    datos = ws.Range(ws.Cells(1, 1), ws.Cells(ultFilaReal, ultColReal)).Value
+    If IsEmpty(datos) Then Exit Sub
+    If Not IsArray(datos) Then Exit Sub
+
+    Dim nFilas As Long, nCols As Long
+    nFilas = UBound(datos, 1)
+    nCols = UBound(datos, 2)
+    If nFilas < FILA_ENCABEZADO_DIARIO Then Exit Sub
+
+    Dim colsInicio() As Long
+    Dim nFondos As Long
+    nFondos = 0
+    ReDim colsInicio(1 To nCols)
+
+    Dim c As Long, v As String
+    For c = 1 To nCols
+        v = LCase(Trim(CStr(datos(FILA_ENCABEZADO_DIARIO, c) & "")))
+        If v = "día" Or v = "dia" Then
+            nFondos = nFondos + 1
+            colsInicio(nFondos) = c
+        End If
+    Next c
+    If nFondos = 0 Then Exit Sub
+
+    Dim filtrar As Boolean
+    filtrar = (dicDeseados.Count > 0)
+
+    Dim f As Long, colIni As Long, colFin As Long
+    For f = 1 To nFondos
+        colIni = colsInicio(f)
+        If f < nFondos Then
+            colFin = colsInicio(f + 1) - 1
+        Else
+            colFin = nCols
+        End If
+
+        Dim codSBS As String
+        codSBS = NormalizarSBS(CStr(datos(FILA_CODIGO_SBS, colIni) & ""))
+
+        Dim nombreFondo As String
+        nombreFondo = Trim(CStr(datos(1, colIni) & ""))
+        If Len(nombreFondo) = 0 Then nombreFondo = "Fondo_col" & colIni
+
+        Dim etiqueta As String
+        If filtrar Then
+            If Not dicDeseados.Exists(codSBS) Then GoTo SiguienteFondo
+            etiqueta = CStr(dicDeseados(codSBS))
+        Else
+            etiqueta = nombreFondo
+        End If
+
+        If Not dicOrigen.Exists(etiqueta) Then dicOrigen.Add etiqueta, origen
+
+        ProcesarFondo datos, nFilas, colIni, colFin, etiqueta, _
+                      dicTipos, dicMeses, ordenFondos
+SiguienteFondo:
+    Next f
+End Sub
+
+' ============================================================
+'  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
+'  Cada sub-bloque termina al aparecer texto no-fecha
+'  (codigo SBS, MONEDA?, otro F1/F2/F3) o fin de hoja.
+' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
                           ByVal etiqueta As String, _
@@ -11,12 +259,15 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
         etq = UCase(Trim(CStr(datos(r, colIni) & "")))
 
         If etq = "F1" Or etq = "F2" Or etq = "F3" Then
-            Dim tipo As String: tipo = etq
-            Dim filaHdr As Long: filaHdr = r
+            Dim tipo As String
+            tipo = etq
+            Dim filaHdr As Long
+            filaHdr = r
 
-            ' Mapear columnas CC/DD/NAV de ESTE sub-bloque
             Dim colCC As Long, colDD As Long, colNAV As Long
-            colCC = 0: colDD = 0: colNAV = 0
+            colCC = 0
+            colDD = 0
+            colNAV = 0
             Dim c As Long, h As String
             For c = colIni To colFin
                 h = UCase(Trim(CStr(datos(filaHdr, c) & "")))
@@ -27,7 +278,6 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                 End Select
             Next c
 
-            ' Obtener (o crear) dicFondos de este tipo y dicMes de este fondo
             Dim dicFondosTipo As Object
             If dicTipos.Exists(tipo) Then
                 Set dicFondosTipo = dicTipos(tipo)
@@ -42,28 +292,28 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             Else
                 Set dicMes = CreateObject("Scripting.Dictionary")
                 dicFondosTipo.Add etiqueta, dicMes
-                Dim claveOrden As String: claveOrden = tipo & "|" & etiqueta
+                Dim claveOrden As String
+                claveOrden = tipo & "|" & etiqueta
                 If Not ordenFondos.Exists(claveOrden) Then ordenFondos.Add claveOrden, ordenFondos.Count
             End If
 
-            ' Leer las fechas de ESTE sub-bloque, fila por fila hacia abajo.
-            ' El sub-bloque termina en cuanto aparece algo que NO es fecha válida
-            ' (código SBS, "MONEDA?", otro F1/F2/F3, o se acaba la hoja),
-            ' PERO toleramos celdas vacías intermedias antes de los datos.
-            Dim rr As Long: rr = filaHdr + 1
-            Dim yaLeyoDatos As Boolean: yaLeyoDatos = False
+            Dim rr As Long
+            rr = filaHdr + 1
+            Dim yaLeyoDatos As Boolean
+            yaLeyoDatos = False
 
             Do While rr <= nFilas
-                Dim valFecha As Variant: valFecha = datos(rr, colIni)
-                Dim sCelda As String: sCelda = UCase(Trim(CStr(valFecha & "")))
+                Dim valFecha As Variant
+                valFecha = datos(rr, colIni)
+                Dim sCelda As String
+                sCelda = UCase(Trim(CStr(valFecha & "")))
 
-                ' Otro encabezado de tipo -> fin de este sub-bloque
                 If sCelda = "F1" Or sCelda = "F2" Or sCelda = "F3" Then Exit Do
 
-                Dim clave As String: clave = ParsearMesAnio(valFecha)
+                Dim clave As String
+                clave = ParsearMesAnio(valFecha)
 
                 If clave <> "" Then
-                    ' Es una fecha válida: leer datos
                     yaLeyoDatos = True
                     Dim cc As Double, dd As Double, nav As Double
                     cc = LeerNumero(datos, rr, colCC)
@@ -71,21 +321,18 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                     nav = LeerNumero(datos, rr, colNAV)
 
                     If dicMes.Exists(clave) Then
-                        Dim arr As Variant: arr = dicMes(clave)
-                        arr(2) = nav            ' ajuste: último NAV manda
+                        Dim arr As Variant
+                        arr = dicMes(clave)
+                        arr(2) = nav
                         dicMes(clave) = arr
                     Else
                         dicMes.Add clave, Array(cc, dd, nav)
                     End If
                     If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
                 Else
-                    ' No es fecha válida
                     If sCelda = "" Then
-                        ' Celda vacía: si todavía no empezaron los datos, tolerar y seguir.
-                        ' Si ya leímos datos, una vacía marca el fin del sub-bloque.
                         If yaLeyoDatos Then Exit Do
                     Else
-                        ' Texto/código/MONEDA? -> fin de este sub-bloque
                         Exit Do
                     End If
                 End If
@@ -98,4 +345,502 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             r = r + 1
         End If
     Loop
+End Sub
+
+' ============================================================
+'  FUNCIONES AUXILIARES
+' ============================================================
+Private Function LeerNumero(datos As Variant, ByVal r As Long, ByVal c As Long) As Double
+    If c = 0 Then
+        LeerNumero = 0
+        Exit Function
+    End If
+    Dim v As Variant
+    v = datos(r, c)
+    If IsNumeric(v) Then LeerNumero = CDbl(v) Else LeerNumero = 0
+End Function
+
+Private Function NormalizarSBS(ByVal s As String) As String
+    Dim r As String
+    r = UCase(Trim(CStr(s)))
+    r = Replace(r, " ", "")
+    r = Replace(r, Chr(160), "")
+    r = Replace(r, vbTab, "")
+    r = Replace(r, Chr(10), "")
+    r = Replace(r, Chr(13), "")
+    NormalizarSBS = r
+End Function
+
+Private Function SeleccionarArchivo() As String
+    SeleccionarArchivo = ""
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Seleccione el archivo Marcas"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel", "*.xlsx; *.xlsm; *.xls"
+        .Filters.Add "Todos", "*.*"
+        If .Show = -1 Then SeleccionarArchivo = .SelectedItems(1)
+    End With
+End Function
+
+Private Function ObtenerLibroAbierto(ByVal rutaCompleta As String) As Workbook
+    Dim soloNombre As String
+    soloNombre = Mid(rutaCompleta, InStrRev(rutaCompleta, "\") + 1)
+    Dim wb As Workbook
+    For Each wb In Application.Workbooks
+        If StrComp(wb.Name, soloNombre, vbTextCompare) = 0 Then
+            Set ObtenerLibroAbierto = wb
+            Exit Function
+        End If
+    Next wb
+    Set ObtenerLibroAbierto = Nothing
+End Function
+
+Private Function ParsearMesAnio(ByVal v As Variant) As String
+    ParsearMesAnio = ""
+    If VarType(v) = vbDate Then
+        Dim d As Date
+        d = CDate(v)
+        Dim yReal As Long
+        yReal = Year(d)
+        If yReal >= 2000 And yReal <= 2100 Then ParsearMesAnio = Format(d, "yyyy-mm")
+        Exit Function
+    End If
+    If IsNumeric(v) Then Exit Function
+
+    Dim s As String
+    s = LCase(Trim(CStr(v & "")))
+    If Len(s) = 0 Then Exit Function
+    s = Replace(s, ".", "")
+    s = Replace(s, "/", "-")
+    s = Replace(s, " ", "-")
+
+    Dim partes() As String
+    partes = Split(s, "-")
+    If UBound(partes) < 1 Then Exit Function
+
+    Dim mesTxt As String, anioTxt As String
+    mesTxt = Trim(partes(0))
+    anioTxt = Trim(partes(1))
+
+    Dim mm As Long
+    mm = 0
+    Select Case Left(mesTxt, 3)
+        Case "ene": mm = 1
+        Case "feb": mm = 2
+        Case "mar": mm = 3
+        Case "abr": mm = 4
+        Case "may": mm = 5
+        Case "jun": mm = 6
+        Case "jul": mm = 7
+        Case "ago": mm = 8
+        Case "sep", "set": mm = 9
+        Case "oct": mm = 10
+        Case "nov": mm = 11
+        Case "dic": mm = 12
+    End Select
+    If mm = 0 Then Exit Function
+
+    If Not IsNumeric(anioTxt) Then Exit Function
+    Dim yy As Long
+    yy = CLng(anioTxt)
+    If yy < 100 Then yy = 2000 + yy
+    If yy < 2000 Or yy > 2100 Then Exit Function
+
+    ParsearMesAnio = Format(yy, "0000") & "-" & Format(mm, "00")
+End Function
+
+Private Function OrdenarClaves(dic As Object) As Variant
+    Dim n As Long
+    n = dic.Count
+    If n = 0 Then
+        OrdenarClaves = Array()
+        Exit Function
+    End If
+    Dim arr() As String
+    ReDim arr(0 To n - 1)
+    Dim k As Variant, i As Long
+    i = 0
+    For Each k In dic.Keys
+        arr(i) = CStr(k)
+        i = i + 1
+    Next k
+    Dim j As Long, tmp As String
+    For i = 0 To n - 2
+        For j = 0 To n - 2 - i
+            If arr(j) > arr(j + 1) Then
+                tmp = arr(j)
+                arr(j) = arr(j + 1)
+                arr(j + 1) = tmp
+            End If
+        Next j
+    Next i
+    OrdenarClaves = arr
+End Function
+
+Private Function FondosEnOrden(dicFondosTipo As Object, ordenFondos As Object, ByVal tipo As String) As Variant
+    Dim n As Long
+    n = dicFondosTipo.Count
+    If n = 0 Then
+        FondosEnOrden = Array()
+        Exit Function
+    End If
+
+    Dim nombres() As String, ordenes() As Long
+    ReDim nombres(0 To n - 1)
+    ReDim ordenes(0 To n - 1)
+    Dim k As Variant, i As Long
+    i = 0
+    For Each k In dicFondosTipo.Keys
+        nombres(i) = CStr(k)
+        Dim claveOrden As String
+        claveOrden = tipo & "|" & CStr(k)
+        If ordenFondos.Exists(claveOrden) Then ordenes(i) = ordenFondos(claveOrden) Else ordenes(i) = 999999
+        i = i + 1
+    Next k
+
+    Dim a As Long, b As Long, tmpL As Long, tmpS As String
+    For a = 0 To n - 2
+        For b = 0 To n - 2 - a
+            If ordenes(b) > ordenes(b + 1) Then
+                tmpL = ordenes(b)
+                ordenes(b) = ordenes(b + 1)
+                ordenes(b + 1) = tmpL
+                tmpS = nombres(b)
+                nombres(b) = nombres(b + 1)
+                nombres(b + 1) = tmpS
+            End If
+        Next b
+    Next a
+
+    FondosEnOrden = nombres
+End Function
+
+' ============================================================
+'  ESCRIBIR HOJA MENSUAL DE UN TIPO (CC=0, DD=1, NAV=2)
+' ============================================================
+Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
+                                ByVal idxMetrica As Long, ByVal tipo As String, _
+                                dicFondosTipo As Object, ordenFondos As Object, _
+                                dicOrigen As Object, mesesOrdenados As Variant)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = nombreHoja
+    Else
+        ws.Cells.Clear
+    End If
+
+    Dim nMeses As Long
+    nMeses = 0
+    If IsArray(mesesOrdenados) Then
+        On Error Resume Next
+        nMeses = UBound(mesesOrdenados) - LBound(mesesOrdenados) + 1
+        On Error GoTo 0
+    End If
+
+    ws.Cells(1, 1).Value = "Fondo"
+    ws.Cells(1, 2).Value = "Origen"
+    Dim m As Long
+    For m = 0 To nMeses - 1
+        ws.Cells(1, 3 + m).Value = CStr(mesesOrdenados(m))
+    Next m
+
+    Dim nombres As Variant
+    nombres = FondosEnOrden(dicFondosTipo, ordenFondos, tipo)
+    Dim nFondos As Long
+    nFondos = 0
+    If IsArray(nombres) Then
+        On Error Resume Next
+        nFondos = UBound(nombres) - LBound(nombres) + 1
+        On Error GoTo 0
+    End If
+    If nFondos = 0 Then Exit Sub
+
+    Dim salida() As Variant
+    ReDim salida(1 To nFondos, 1 To nMeses + 2)
+
+    Dim idx As Long
+    For idx = 0 To nFondos - 1
+        Dim nombre As String
+        nombre = CStr(nombres(idx))
+        salida(idx + 1, 1) = nombre
+        If dicOrigen.Exists(nombre) Then salida(idx + 1, 2) = dicOrigen(nombre) Else salida(idx + 1, 2) = ""
+        Dim dicMes As Object
+        Set dicMes = dicFondosTipo(nombre)
+        For m = 0 To nMeses - 1
+            Dim clave As String
+            clave = CStr(mesesOrdenados(m))
+            If dicMes.Exists(clave) Then
+                salida(idx + 1, m + 3) = dicMes(clave)(idxMetrica)
+            Else
+                salida(idx + 1, m + 3) = ""
+            End If
+        Next m
+    Next idx
+
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 2)).Value = salida
+    ws.Rows(1).Font.Bold = True
+    ws.Columns(1).AutoFit
+    ws.Columns(2).AutoFit
+End Sub
+
+' ============================================================
+'  ESCRIBIR BASE ANUAL DE UN TIPO (CC/DD suma; NAV cierre)
+' ============================================================
+Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
+                              ByVal idxMetrica As Long, ByVal tipo As String, _
+                              dicFondosTipo As Object, ordenFondos As Object, _
+                              dicOrigen As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = nombreHoja
+    Else
+        ws.Cells.Clear
+    End If
+
+    Dim dicAnios As Object
+    Set dicAnios = CreateObject("Scripting.Dictionary")
+    Dim nombre As Variant, dicMes As Object, k As Variant
+    For Each nombre In dicFondosTipo.Keys
+        Set dicMes = dicFondosTipo(nombre)
+        For Each k In dicMes.Keys
+            Dim anio As String
+            anio = Left(CStr(k), 4)
+            If Not dicAnios.Exists(anio) Then dicAnios.Add anio, True
+        Next k
+    Next nombre
+
+    Dim aniosOrden As Variant
+    aniosOrden = OrdenarClaves(dicAnios)
+    Dim nAnios As Long
+    nAnios = dicAnios.Count
+
+    ws.Cells(1, 1).Value = "Fondo"
+    ws.Cells(1, 2).Value = "Origen"
+    Dim j As Long
+    For j = 0 To nAnios - 1
+        ws.Cells(1, 3 + j).Value = CStr(aniosOrden(j))
+    Next j
+
+    Dim nombres As Variant
+    nombres = FondosEnOrden(dicFondosTipo, ordenFondos, tipo)
+    Dim nFondos As Long
+    nFondos = 0
+    If IsArray(nombres) Then
+        On Error Resume Next
+        nFondos = UBound(nombres) - LBound(nombres) + 1
+        On Error GoTo 0
+    End If
+    If nFondos = 0 Then Exit Sub
+
+    Dim salida() As Variant
+    ReDim salida(1 To nFondos, 1 To nAnios + 2)
+
+    Dim idx As Long
+    For idx = 0 To nFondos - 1
+        Dim nom As String
+        nom = CStr(nombres(idx))
+        salida(idx + 1, 1) = nom
+        If dicOrigen.Exists(nom) Then salida(idx + 1, 2) = dicOrigen(nom) Else salida(idx + 1, 2) = ""
+        Set dicMes = dicFondosTipo(nom)
+
+        Dim acumAnio As Object
+        Set acumAnio = CreateObject("Scripting.Dictionary")
+        Dim mesCierre As Object
+        Set mesCierre = CreateObject("Scripting.Dictionary")
+        For Each k In dicMes.Keys
+            Dim a As String
+            a = Left(CStr(k), 4)
+            Dim val As Double
+            val = dicMes(k)(idxMetrica)
+            If idxMetrica = 2 Then
+                If Not mesCierre.Exists(a) Then
+                    mesCierre.Add a, CStr(k)
+                    acumAnio.Add a, val
+                ElseIf CStr(k) > CStr(mesCierre(a)) Then
+                    mesCierre(a) = CStr(k)
+                    acumAnio(a) = val
+                End If
+            Else
+                If acumAnio.Exists(a) Then acumAnio(a) = acumAnio(a) + val Else acumAnio.Add a, val
+            End If
+        Next k
+
+        For j = 0 To nAnios - 1
+            Dim ay As String
+            ay = CStr(aniosOrden(j))
+            If acumAnio.Exists(ay) Then salida(idx + 1, j + 3) = acumAnio(ay) Else salida(idx + 1, j + 3) = ""
+        Next j
+    Next idx
+
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 2)).Value = salida
+    ws.Rows(1).Font.Bold = True
+    ws.Columns(1).AutoFit
+    ws.Columns(2).AutoFit
+End Sub
+
+' ============================================================
+'  CONSOLIDADO ANUAL DE UN TIPO + GRAFICOS
+' ============================================================
+Private Sub GenerarConsolidadoAnual(wb As Workbook, ByVal nombreHoja As String, ByVal tipo As String, _
+                                    dicFondosTipo As Object, dicOrigen As Object)
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wb.Worksheets(nombreHoja)
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = wb.Worksheets.Add(After:=wb.Worksheets(wb.Worksheets.Count))
+        ws.Name = nombreHoja
+    Else
+        ws.Cells.Clear
+        Dim chDel As ChartObject
+        For Each chDel In ws.ChartObjects
+            chDel.Delete
+        Next chDel
+    End If
+
+    Dim dicGrupo As Object
+    Set dicGrupo = CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "TOTAL", CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "Local", CreateObject("Scripting.Dictionary")
+    dicGrupo.Add "Extranjero", CreateObject("Scripting.Dictionary")
+
+    Dim dicAniosGlobal As Object
+    Set dicAniosGlobal = CreateObject("Scripting.Dictionary")
+
+    Dim nombre As Variant, dicMes As Object, k As Variant
+    For Each nombre In dicFondosTipo.Keys
+        Set dicMes = dicFondosTipo(nombre)
+        Dim org As String
+        If dicOrigen.Exists(nombre) Then org = CStr(dicOrigen(nombre)) Else org = ""
+
+        Dim ccAnio As Object
+        Set ccAnio = CreateObject("Scripting.Dictionary")
+        Dim ddAnio As Object
+        Set ddAnio = CreateObject("Scripting.Dictionary")
+        Dim navCierre As Object
+        Set navCierre = CreateObject("Scripting.Dictionary")
+        Dim mesCierre As Object
+        Set mesCierre = CreateObject("Scripting.Dictionary")
+
+        For Each k In dicMes.Keys
+            Dim anio As String
+            anio = Left(CStr(k), 4)
+            If Not dicAniosGlobal.Exists(anio) Then dicAniosGlobal.Add anio, True
+            Dim arr As Variant
+            arr = dicMes(k)
+            If ccAnio.Exists(anio) Then ccAnio(anio) = ccAnio(anio) + arr(0) Else ccAnio.Add anio, arr(0)
+            If ddAnio.Exists(anio) Then ddAnio(anio) = ddAnio(anio) + arr(1) Else ddAnio.Add anio, arr(1)
+            If Not mesCierre.Exists(anio) Then
+                mesCierre.Add anio, CStr(k)
+                navCierre.Add anio, arr(2)
+            ElseIf CStr(k) > CStr(mesCierre(anio)) Then
+                mesCierre(anio) = CStr(k)
+                navCierre(anio) = arr(2)
+            End If
+        Next k
+
+        Dim ay As Variant
+        For Each ay In ccAnio.Keys
+            Dim aporte As Variant
+            aporte = Array(ccAnio(ay), ddAnio(ay), navCierre(ay))
+            AcumularGrupo dicGrupo("TOTAL"), CStr(ay), aporte
+            If org = "Local" Or org = "Extranjero" Then AcumularGrupo dicGrupo(org), CStr(ay), aporte
+        Next ay
+    Next nombre
+
+    Dim anios As Variant
+    anios = OrdenarClaves(dicAniosGlobal)
+    Dim nA As Long
+    nA = dicAniosGlobal.Count
+    If nA = 0 Then Exit Sub
+
+    Dim filaBase As Long
+    filaBase = 1
+    EscribirBloqueConsolidado ws, tipo & " - TOTAL", dicGrupo("TOTAL"), anios, nA, filaBase
+    filaBase = filaBase + nA + 16
+    EscribirBloqueConsolidado ws, tipo & " - Local", dicGrupo("Local"), anios, nA, filaBase
+    filaBase = filaBase + nA + 16
+    EscribirBloqueConsolidado ws, tipo & " - Extranjero", dicGrupo("Extranjero"), anios, nA, filaBase
+
+    ws.Columns("A:D").AutoFit
+End Sub
+
+Private Sub AcumularGrupo(dicAnual As Object, ByVal anio As String, arr As Variant)
+    Dim acum As Variant
+    If dicAnual.Exists(anio) Then acum = dicAnual(anio) Else acum = Array(0#, 0#, 0#)
+    acum(0) = acum(0) + arr(0)
+    acum(1) = acum(1) + arr(1)
+    acum(2) = acum(2) + arr(2)
+    dicAnual(anio) = acum
+End Sub
+
+Private Sub EscribirBloqueConsolidado(ws As Worksheet, ByVal grupo As String, _
+                                      dicAnual As Object, anios As Variant, _
+                                      ByVal nA As Long, ByVal filaBase As Long)
+    ws.Cells(filaBase, 1).Value = "Consolidado: " & grupo
+    ws.Cells(filaBase, 1).Font.Bold = True
+
+    Dim filaHdr As Long
+    filaHdr = filaBase + 1
+    ws.Cells(filaHdr, 1).Value = "Año"
+    ws.Cells(filaHdr, 2).Value = "Suma CC"
+    ws.Cells(filaHdr, 3).Value = "Suma DD"
+    ws.Cells(filaHdr, 4).Value = "NAV Cierre"
+    ws.Range(ws.Cells(filaHdr, 1), ws.Cells(filaHdr, 4)).Font.Bold = True
+    ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaHdr + nA, 1)).NumberFormat = "@"
+
+    Dim i As Long
+    For i = 0 To nA - 1
+        Dim a As String
+        a = CStr(anios(i))
+        Dim valArr As Variant
+        If dicAnual.Exists(a) Then valArr = dicAnual(a) Else valArr = Array(0#, 0#, 0#)
+        ws.Cells(filaHdr + 1 + i, 1).Value = a
+        ws.Cells(filaHdr + 1 + i, 2).Value = valArr(0)
+        ws.Cells(filaHdr + 1 + i, 3).Value = valArr(1)
+        ws.Cells(filaHdr + 1 + i, 4).Value = valArr(2)
+    Next i
+
+    Dim filaUlt As Long
+    filaUlt = filaHdr + nA
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 2), ws.Cells(filaUlt, 2)), filaHdr, 6, "CC - " & grupo
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 3), ws.Cells(filaUlt, 3)), filaHdr, 14, "DD - " & grupo
+    CrearGrafico ws, ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaUlt, 1)), _
+                 ws.Range(ws.Cells(filaHdr + 1, 4), ws.Cells(filaUlt, 4)), filaHdr, 22, "NAV - " & grupo
+End Sub
+
+Private Sub CrearGrafico(ws As Worksheet, rngCat As Range, rngVal As Range, _
+                         ByVal filaTop As Long, ByVal colLeft As Long, ByVal titulo As String)
+    Dim co As ChartObject
+    Set co = ws.ChartObjects.Add( _
+        Left:=ws.Cells(filaTop, colLeft).Left, Top:=ws.Cells(filaTop, colLeft).Top, _
+        Width:=380, Height:=240)
+    Dim ch As Chart
+    Set ch = co.Chart
+    ch.ChartType = xlColumnClustered
+    Do While ch.SeriesCollection.Count > 0
+        ch.SeriesCollection(1).Delete
+    Loop
+    Dim s As Series
+    Set s = ch.SeriesCollection.NewSeries
+    s.Values = rngVal
+    s.XValues = rngCat
+    s.Name = titulo
+    ch.HasTitle = True
+    ch.ChartTitle.Text = titulo
+    ch.HasLegend = False
+    On Error Resume Next
+    ch.Axes(xlCategory).CategoryType = xlCategoryScale
+    On Error GoTo 0
 End Sub
