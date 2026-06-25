@@ -51,18 +51,19 @@ Sub GenerarBasesLimpias()
     Dim dicMeses As Object
     Dim ordenFondos As Object
     Dim dicOrigen As Object
+    Dim dicCodigo As Object
     Set dicTipos = CreateObject("Scripting.Dictionary")
     Set dicMeses = CreateObject("Scripting.Dictionary")
     Set ordenFondos = CreateObject("Scripting.Dictionary")
     Set dicOrigen = CreateObject("Scripting.Dictionary")
+    Set dicCodigo = CreateObject("Scripting.Dictionary")
 
-    ProcesarHoja wbMarcas, "1", "Local", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen
-    ProcesarHoja wbMarcas, "2", "Extranjero", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen
+    ProcesarHoja wbMarcas, "1", "Local", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen, dicCodigo
+    ProcesarHoja wbMarcas, "2", "Extranjero", dicTipos, dicMeses, ordenFondos, dicDeseados, dicOrigen, dicCodigo
 
     If loAbriYo Then wbMarcas.Close SaveChanges:=False
     Set wbMarcas = Nothing
 
-    ' Rellenar F3 con F2 para los fondos configurados en "Reglas_F3"
     RellenarF3conF2 wbDest, dicTipos, dicMeses
 
     Dim mesesOrdenados As Variant
@@ -78,17 +79,16 @@ Sub GenerarBasesLimpias()
             Dim dicFondosTipo As Object
             Set dicFondosTipo = dicTipos(tipo)
 
-            EscribirHojaMetrica wbDest, "Base_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
-            EscribirHojaMetrica wbDest, "Base_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
-            EscribirHojaMetrica wbDest, "Base_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen, mesesOrdenados
+            EscribirHojaMetrica wbDest, "Base_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo, mesesOrdenados
+            EscribirHojaMetrica wbDest, "Base_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo, mesesOrdenados
+            EscribirHojaMetrica wbDest, "Base_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo, mesesOrdenados
 
-            EscribirHojaAnual wbDest, "Anual_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen
-            EscribirHojaAnual wbDest, "Anual_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen
-            EscribirHojaAnual wbDest, "Anual_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen
+            EscribirHojaAnual wbDest, "Anual_CC_" & tipo, 0, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo
+            EscribirHojaAnual wbDest, "Anual_DD_" & tipo, 1, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo
+            EscribirHojaAnual wbDest, "Anual_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen, dicCodigo
 
             GenerarConsolidadoAnual wbDest, "Consol_" & tipo, tipo, dicFondosTipo, dicOrigen
 
-            ' Formato institucional Profuturo
             AplicarFormatoProfuturo wbDest.Worksheets("Base_CC_" & tipo)
             AplicarFormatoProfuturo wbDest.Worksheets("Base_DD_" & tipo)
             AplicarFormatoProfuturo wbDest.Worksheets("Base_NAV_" & tipo)
@@ -172,7 +172,7 @@ End Function
 ' ============================================================
 Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal origen As String, _
                          dicTipos As Object, dicMeses As Object, ordenFondos As Object, _
-                         dicDeseados As Object, dicOrigen As Object)
+                         dicDeseados As Object, dicOrigen As Object, dicCodigo As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -232,6 +232,8 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal orige
 
         Dim codSBS As String
         codSBS = NormalizarSBS(CStr(datos(FILA_CODIGO_SBS, colIni) & ""))
+        Dim codOriginal As String
+        codOriginal = Trim(CStr(datos(FILA_CODIGO_SBS, colIni) & ""))
 
         Dim nombreFondo As String
         nombreFondo = Trim(CStr(datos(1, colIni) & ""))
@@ -246,6 +248,7 @@ Private Sub ProcesarHoja(wb As Workbook, ByVal nombreHoja As String, ByVal orige
         End If
 
         If Not dicOrigen.Exists(etiqueta) Then dicOrigen.Add etiqueta, origen
+        If Not dicCodigo.Exists(etiqueta) Then dicCodigo.Add etiqueta, codOriginal
 
         ProcesarFondo datos, nFilas, colIni, colFin, etiqueta, _
                       dicTipos, dicMeses, ordenFondos
@@ -255,10 +258,6 @@ End Sub
 
 ' ============================================================
 '  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
-'   - Fecha (fin de mes) en la columna del tipo (colIni)
-'   - Orden fijo: [tipo] CC DD NAV -> CC=colIni+1, DD=+2, NAV=+3
-'   - Corta el sub-bloque en otro F1/F2/F3 o en MONEDA
-'   - Ajuste mismo mes: ultimo NAV manda, CC/DD del primero
 ' ============================================================
 Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
                           ByVal colIni As Long, ByVal colFin As Long, _
@@ -361,9 +360,7 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
 End Sub
 
 ' ============================================================
-'  RELLENAR F3 CON F2 para fondos configurados en "Reglas_F3"
-'  Desde el primer mes faltante de F3 en adelante, copia
-'  CC/DD/NAV de F2 (solo meses que F2 tenga y F3 no).
+'  RELLENAR F3 CON F2 (hoja "Reglas_F3")
 ' ============================================================
 Private Sub RellenarF3conF2(wbDest As Workbook, dicTipos As Object, dicMeses As Object)
     If Not dicTipos.Exists("F2") Then Exit Sub
@@ -431,9 +428,6 @@ End Sub
 
 ' ============================================================
 '  FORMATO INSTITUCIONAL PROFUTURO
-'  Arial 8, encabezado rojo RGB(212,12,12) con fondo gris,
-'  bordes solo arriba/abajo, numeros con separador de miles
-'  sin decimales, negativos como numero negativo.
 ' ============================================================
 Private Sub AplicarFormatoProfuturo(ws As Worksheet)
     Dim ROJO As Long
@@ -462,14 +456,12 @@ Private Sub AplicarFormatoProfuturo(ws As Worksheet)
         .Color = RGB(0, 0, 0)
     End With
 
-    ' Numeros: separador de miles, SIN decimales, negativos como numero negativo
     If ultF >= 2 Then
         Dim rngDatos As Range
         Set rngDatos = ws.Range(ws.Cells(2, 1), ws.Cells(ultF, ultC))
         rngDatos.NumberFormat = "#,##0;-#,##0"
     End If
 
-    ' Encabezado fila 1: rojo, negrita, fondo gris
     Dim rngHdr As Range
     Set rngHdr = ws.Range(ws.Cells(1, 1), ws.Cells(1, ultC))
     With rngHdr
@@ -478,7 +470,6 @@ Private Sub AplicarFormatoProfuturo(ws As Worksheet)
         .Interior.Color = GRIS
     End With
 
-    ' Bordes solo superior/inferior del encabezado
     With rngHdr.Borders(xlEdgeTop)
         .LineStyle = xlContinuous
         .Weight = xlThin
@@ -490,7 +481,6 @@ Private Sub AplicarFormatoProfuturo(ws As Worksheet)
         .Color = RGB(0, 0, 0)
     End With
 
-    ' Borde inferior de cierre en la ultima fila
     If ultF >= 2 Then
         With ws.Range(ws.Cells(ultF, 1), ws.Cells(ultF, ultC)).Borders(xlEdgeBottom)
             .LineStyle = xlContinuous
@@ -506,6 +496,7 @@ Private Sub AplicarFormatoProfuturo(ws As Worksheet)
 
     ws.Columns(1).AutoFit
     ws.Columns(2).AutoFit
+    ws.Columns(3).AutoFit
 End Sub
 
 ' ============================================================
@@ -678,12 +669,12 @@ Private Function FondosEnOrden(dicFondosTipo As Object, ordenFondos As Object, B
 End Function
 
 ' ============================================================
-'  ESCRIBIR HOJA MENSUAL DE UN TIPO (CC=0, DD=1, NAV=2)
+'  ESCRIBIR HOJA MENSUAL: Fondo | Codigo SBS | Origen | meses
 ' ============================================================
 Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
                                 ByVal idxMetrica As Long, ByVal tipo As String, _
                                 dicFondosTipo As Object, ordenFondos As Object, _
-                                dicOrigen As Object, mesesOrdenados As Variant)
+                                dicOrigen As Object, dicCodigo As Object, mesesOrdenados As Variant)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -704,10 +695,11 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
     End If
 
     ws.Cells(1, 1).Value = "Fondo"
-    ws.Cells(1, 2).Value = "Origen"
+    ws.Cells(1, 2).Value = "Codigo SBS"
+    ws.Cells(1, 3).Value = "Origen"
     Dim m As Long
     For m = 0 To nMeses - 1
-        ws.Cells(1, 3 + m).Value = CStr(mesesOrdenados(m))
+        ws.Cells(1, 4 + m).Value = CStr(mesesOrdenados(m))
     Next m
 
     Dim nombres As Variant
@@ -722,38 +714,39 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
     If nFondos = 0 Then Exit Sub
 
     Dim salida() As Variant
-    ReDim salida(1 To nFondos, 1 To nMeses + 2)
+    ReDim salida(1 To nFondos, 1 To nMeses + 3)
 
     Dim idx As Long
     For idx = 0 To nFondos - 1
         Dim nombre As String
         nombre = CStr(nombres(idx))
         salida(idx + 1, 1) = nombre
-        If dicOrigen.Exists(nombre) Then salida(idx + 1, 2) = dicOrigen(nombre) Else salida(idx + 1, 2) = ""
+        If dicCodigo.Exists(nombre) Then salida(idx + 1, 2) = dicCodigo(nombre) Else salida(idx + 1, 2) = ""
+        If dicOrigen.Exists(nombre) Then salida(idx + 1, 3) = dicOrigen(nombre) Else salida(idx + 1, 3) = ""
         Dim dicMes As Object
         Set dicMes = dicFondosTipo(nombre)
         For m = 0 To nMeses - 1
             Dim clave As String
             clave = CStr(mesesOrdenados(m))
             If dicMes.Exists(clave) Then
-                salida(idx + 1, m + 3) = dicMes(clave)(idxMetrica)
+                salida(idx + 1, m + 4) = dicMes(clave)(idxMetrica)
             Else
-                salida(idx + 1, m + 3) = ""
+                salida(idx + 1, m + 4) = ""
             End If
         Next m
     Next idx
 
-    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 2)).Value = salida
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 3)).Value = salida
     ws.Rows(1).Font.Bold = True
 End Sub
 
 ' ============================================================
-'  ESCRIBIR BASE ANUAL DE UN TIPO (CC/DD suma; NAV cierre)
+'  ESCRIBIR BASE ANUAL: Fondo | Codigo SBS | Origen | anios
 ' ============================================================
 Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
                               ByVal idxMetrica As Long, ByVal tipo As String, _
                               dicFondosTipo As Object, ordenFondos As Object, _
-                              dicOrigen As Object)
+                              dicOrigen As Object, dicCodigo As Object)
     Dim ws As Worksheet
     On Error Resume Next
     Set ws = wb.Worksheets(nombreHoja)
@@ -783,10 +776,11 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
     nAnios = dicAnios.Count
 
     ws.Cells(1, 1).Value = "Fondo"
-    ws.Cells(1, 2).Value = "Origen"
+    ws.Cells(1, 2).Value = "Codigo SBS"
+    ws.Cells(1, 3).Value = "Origen"
     Dim j As Long
     For j = 0 To nAnios - 1
-        ws.Cells(1, 3 + j).Value = CStr(aniosOrden(j))
+        ws.Cells(1, 4 + j).Value = CStr(aniosOrden(j))
     Next j
 
     Dim nombres As Variant
@@ -801,14 +795,15 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
     If nFondos = 0 Then Exit Sub
 
     Dim salida() As Variant
-    ReDim salida(1 To nFondos, 1 To nAnios + 2)
+    ReDim salida(1 To nFondos, 1 To nAnios + 3)
 
     Dim idx As Long
     For idx = 0 To nFondos - 1
         Dim nom As String
         nom = CStr(nombres(idx))
         salida(idx + 1, 1) = nom
-        If dicOrigen.Exists(nom) Then salida(idx + 1, 2) = dicOrigen(nom) Else salida(idx + 1, 2) = ""
+        If dicCodigo.Exists(nom) Then salida(idx + 1, 2) = dicCodigo(nom) Else salida(idx + 1, 2) = ""
+        If dicOrigen.Exists(nom) Then salida(idx + 1, 3) = dicOrigen(nom) Else salida(idx + 1, 3) = ""
         Set dicMes = dicFondosTipo(nom)
 
         Dim acumAnio As Object
@@ -836,11 +831,11 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
         For j = 0 To nAnios - 1
             Dim ay As String
             ay = CStr(aniosOrden(j))
-            If acumAnio.Exists(ay) Then salida(idx + 1, j + 3) = acumAnio(ay) Else salida(idx + 1, j + 3) = ""
+            If acumAnio.Exists(ay) Then salida(idx + 1, j + 4) = acumAnio(ay) Else salida(idx + 1, j + 4) = ""
         Next j
     Next idx
 
-    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 2)).Value = salida
+    ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 3)).Value = salida
     ws.Rows(1).Font.Bold = True
 End Sub
 
