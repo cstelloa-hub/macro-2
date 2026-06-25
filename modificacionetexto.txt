@@ -1,25 +1,34 @@
 Option Explicit
 
-Sub RastrearASF()
+Sub RastrearPorCodigo()
     Dim ruta As String
     With Application.FileDialog(msoFileDialogFilePicker)
         .Title = "Seleccione Marcas": .AllowMultiSelect = False
         If .Show <> -1 Then Exit Sub
         ruta = .SelectedItems(1)
     End With
+
     Dim soloNombre As String: soloNombre = Mid(ruta, InStrRev(ruta, "\") + 1)
     Dim wb As Workbook, loAbri As Boolean, w As Workbook
     For Each w In Application.Workbooks
         If StrComp(w.Name, soloNombre, vbTextCompare) = 0 Then Set wb = w
     Next w
-    If wb Is Nothing Then Set wb = Workbooks.Open(ruta, ReadOnly:=True, UpdateLinks:=0): loAbri = True
+    If wb Is Nothing Then
+        Set wb = Workbooks.Open(ruta, ReadOnly:=True, UpdateLinks:=0)
+        loAbri = True
+    End If
 
-    Dim buscar As String
-    buscar = UCase(Trim(InputBox("Parte del nombre del fondo (ej. ASF):", "Buscar")))
-    If Len(buscar) = 0 Then If loAbri Then wb.Close False: Exit Sub
+    Dim buscarCod As String
+    buscarCod = NormRastro(InputBox("Pega el CÓDIGO SBS del fondo (ej. ASF VII):", "Buscar por código"))
+    If Len(buscarCod) = 0 Then
+        If loAbri Then wb.Close False
+        Exit Sub
+    End If
 
     Dim salida As String
+    Dim encontrado As Boolean: encontrado = False
     Dim hoja As Variant
+
     For Each hoja In Array("1", "2")
         Dim ws As Worksheet: Set ws = Nothing
         On Error Resume Next
@@ -27,19 +36,24 @@ Sub RastrearASF()
         On Error GoTo 0
         If ws Is Nothing Then GoTo SigH
 
-        ' rango real
-        Dim ufr As Long, ucr As Long
+        ' Rango real
+        Dim ufr As Long, ucr As Long: ufr = 0: ucr = 0
         Dim cb As Range
         On Error Resume Next
-        Set cb = ws.Cells.Find("*", , xlValues, , xlByRows, xlPrevious): If Not cb Is Nothing Then ufr = cb.Row
-        Set cb = ws.Cells.Find("*", , xlValues, , xlByColumns, xlPrevious): If Not cb Is Nothing Then ucr = cb.Column
+        Set cb = ws.Cells.Find("*", , xlValues, , xlByRows, xlPrevious)
+        If Not cb Is Nothing Then ufr = cb.Row
+        Set cb = ws.Cells.Find("*", , xlValues, , xlByColumns, xlPrevious)
+        If Not cb Is Nothing Then ucr = cb.Column
         On Error GoTo 0
+        If ufr < 3 Or ucr < 1 Then GoTo SigH
 
-        Dim datos As Variant: datos = ws.Range(ws.Cells(1, 1), ws.Cells(ufr, ucr)).Value
+        Dim datos As Variant
+        datos = ws.Range(ws.Cells(1, 1), ws.Cells(ufr, ucr)).Value
         If Not IsArray(datos) Then GoTo SigH
         Dim nF As Long, nC As Long: nF = UBound(datos, 1): nC = UBound(datos, 2)
+        If nF < 3 Then GoTo SigH
 
-        ' columnas de inicio (Día en fila 3)
+        ' Columnas de inicio (Día en fila 3)
         Dim cols() As Long, nFon As Long: nFon = 0
         ReDim cols(1 To nC)
         Dim c As Long, vv As String
@@ -47,44 +61,80 @@ Sub RastrearASF()
             vv = LCase(Trim(CStr(datos(3, c) & "")))
             If vv = "día" Or vv = "dia" Then nFon = nFon + 1: cols(nFon) = c
         Next c
+        If nFon = 0 Then GoTo SigH
 
         Dim f As Long, ci As Long, cf As Long
         For f = 1 To nFon
             ci = cols(f)
             If f < nFon Then cf = cols(f + 1) - 1 Else cf = nC
-            Dim nom As String: nom = UCase(Trim(CStr(datos(1, ci) & "")))
-            If InStr(nom, buscar) > 0 Then
+
+            Dim codM As String: codM = NormRastro(CStr(datos(2, ci) & ""))
+            If codM = buscarCod Then
+                encontrado = True
                 salida = salida & "=== " & CStr(datos(1, ci) & "") & " | Hoja " & hoja & _
                          " | colIni=" & ci & " colFin=" & cf & " | nFilas=" & nF & " ===" & vbCrLf
+                salida = salida & "Codigo: [" & CStr(datos(2, ci) & "") & "]" & vbCrLf & vbCrLf
+
+                ' Volcar la primera columna del fondo (fechas/encabezados), fila por fila
                 Dim rr As Long, mostradas As Long: mostradas = 0
                 For rr = 4 To nF
                     Dim val As Variant: val = datos(rr, ci)
                     Dim txt As String: txt = Trim(CStr(val & ""))
                     If Len(txt) > 0 Then
-                        salida = salida & "  f" & rr & ": [" & Left(txt, 14) & "] (" & TypeName(val) & ")" & vbCrLf
+                        salida = salida & "  f" & rr & ": [" & Left(txt, 16) & "] (" & TypeName(val) & ")" & vbCrLf
                         mostradas = mostradas + 1
-                        If mostradas >= 80 Then salida = salida & "  ...(corto)" & vbCrLf: Exit For
+                        If mostradas >= 200 Then
+                            salida = salida & "  ...(cortado a 200 filas)" & vbCrLf
+                            Exit For
+                        End If
                     End If
                 Next rr
-                salida = salida & vbCrLf
+                salida = salida & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
             End If
         Next f
 SigH:
         Set ws = Nothing
     Next hoja
+
     If loAbri Then wb.Close False
 
-    Dim wsOut As Worksheet
+    If Not encontrado Then
+        salida = "No se encontro ningun fondo con el codigo [" & buscarCod & "]." & vbCrLf & _
+                 "Verifica que el codigo este bien copiado."
+    End If
+
+    ' Escribir a un archivo de texto en el Escritorio (o TEMP si falla)
+    Dim rutaTxt As String
+    rutaTxt = Environ("USERPROFILE") & "\Desktop\RASTRO_ASF.txt"
+
+    Dim ff As Integer: ff = FreeFile
     On Error Resume Next
-    Set wsOut = ThisWorkbook.Worksheets("RASTRO")
+    Open rutaTxt For Output As #ff
+    If Err.Number <> 0 Then
+        Err.Clear
+        rutaTxt = Environ("TEMP") & "\RASTRO_ASF.txt"
+        ff = FreeFile
+        Open rutaTxt For Output As #ff
+    End If
     On Error GoTo 0
-    If wsOut Is Nothing Then Set wsOut = ThisWorkbook.Worksheets.Add: wsOut.Name = "RASTRO"
-    wsOut.Cells.Clear
-    Dim lineas() As String: lineas = Split(salida, vbCrLf)
-    Dim i As Long
-    For i = 0 To UBound(lineas)
-        wsOut.Cells(i + 1, 1).Value = lineas(i)
-    Next i
-    wsOut.Columns(1).ColumnWidth = 60
-    MsgBox "Listo. Revisa la hoja RASTRO.", vbInformation
+
+    Print #ff, salida
+    Close #ff
+
+    On Error Resume Next
+    CreateObject("WScript.Shell").Run "notepad.exe """ & rutaTxt & """", 1, False
+    On Error GoTo 0
+
+    MsgBox "Listo. Se guardo y abrio el archivo:" & vbCrLf & rutaTxt, vbInformation
 End Sub
+
+Private Function NormRastro(ByVal s As String) As String
+    Dim r As String
+    r = UCase(Trim(CStr(s)))
+    r = Replace(r, " ", "")
+    r = Replace(r, Chr(160), "")
+    r = Replace(r, vbTab, "")
+    r = Replace(r, Chr(10), "")
+    r = Replace(r, Chr(13), "")
+    NormRastro = r
+End Function
