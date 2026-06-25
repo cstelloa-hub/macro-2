@@ -1,0 +1,90 @@
+Option Explicit
+
+Sub RastrearASF()
+    Dim ruta As String
+    With Application.FileDialog(msoFileDialogFilePicker)
+        .Title = "Seleccione Marcas": .AllowMultiSelect = False
+        If .Show <> -1 Then Exit Sub
+        ruta = .SelectedItems(1)
+    End With
+    Dim soloNombre As String: soloNombre = Mid(ruta, InStrRev(ruta, "\") + 1)
+    Dim wb As Workbook, loAbri As Boolean, w As Workbook
+    For Each w In Application.Workbooks
+        If StrComp(w.Name, soloNombre, vbTextCompare) = 0 Then Set wb = w
+    Next w
+    If wb Is Nothing Then Set wb = Workbooks.Open(ruta, ReadOnly:=True, UpdateLinks:=0): loAbri = True
+
+    Dim buscar As String
+    buscar = UCase(Trim(InputBox("Parte del nombre del fondo (ej. ASF):", "Buscar")))
+    If Len(buscar) = 0 Then If loAbri Then wb.Close False: Exit Sub
+
+    Dim salida As String
+    Dim hoja As Variant
+    For Each hoja In Array("1", "2")
+        Dim ws As Worksheet: Set ws = Nothing
+        On Error Resume Next
+        Set ws = wb.Worksheets(CStr(hoja))
+        On Error GoTo 0
+        If ws Is Nothing Then GoTo SigH
+
+        ' rango real
+        Dim ufr As Long, ucr As Long
+        Dim cb As Range
+        On Error Resume Next
+        Set cb = ws.Cells.Find("*", , xlValues, , xlByRows, xlPrevious): If Not cb Is Nothing Then ufr = cb.Row
+        Set cb = ws.Cells.Find("*", , xlValues, , xlByColumns, xlPrevious): If Not cb Is Nothing Then ucr = cb.Column
+        On Error GoTo 0
+
+        Dim datos As Variant: datos = ws.Range(ws.Cells(1, 1), ws.Cells(ufr, ucr)).Value
+        If Not IsArray(datos) Then GoTo SigH
+        Dim nF As Long, nC As Long: nF = UBound(datos, 1): nC = UBound(datos, 2)
+
+        ' columnas de inicio (Día en fila 3)
+        Dim cols() As Long, nFon As Long: nFon = 0
+        ReDim cols(1 To nC)
+        Dim c As Long, vv As String
+        For c = 1 To nC
+            vv = LCase(Trim(CStr(datos(3, c) & "")))
+            If vv = "día" Or vv = "dia" Then nFon = nFon + 1: cols(nFon) = c
+        Next c
+
+        Dim f As Long, ci As Long, cf As Long
+        For f = 1 To nFon
+            ci = cols(f)
+            If f < nFon Then cf = cols(f + 1) - 1 Else cf = nC
+            Dim nom As String: nom = UCase(Trim(CStr(datos(1, ci) & "")))
+            If InStr(nom, buscar) > 0 Then
+                salida = salida & "=== " & CStr(datos(1, ci) & "") & " | Hoja " & hoja & _
+                         " | colIni=" & ci & " colFin=" & cf & " | nFilas=" & nF & " ===" & vbCrLf
+                Dim rr As Long, mostradas As Long: mostradas = 0
+                For rr = 4 To nF
+                    Dim val As Variant: val = datos(rr, ci)
+                    Dim txt As String: txt = Trim(CStr(val & ""))
+                    If Len(txt) > 0 Then
+                        salida = salida & "  f" & rr & ": [" & Left(txt, 14) & "] (" & TypeName(val) & ")" & vbCrLf
+                        mostradas = mostradas + 1
+                        If mostradas >= 80 Then salida = salida & "  ...(corto)" & vbCrLf: Exit For
+                    End If
+                Next rr
+                salida = salida & vbCrLf
+            End If
+        Next f
+SigH:
+        Set ws = Nothing
+    Next hoja
+    If loAbri Then wb.Close False
+
+    Dim wsOut As Worksheet
+    On Error Resume Next
+    Set wsOut = ThisWorkbook.Worksheets("RASTRO")
+    On Error GoTo 0
+    If wsOut Is Nothing Then Set wsOut = ThisWorkbook.Worksheets.Add: wsOut.Name = "RASTRO"
+    wsOut.Cells.Clear
+    Dim lineas() As String: lineas = Split(salida, vbCrLf)
+    Dim i As Long
+    For i = 0 To UBound(lineas)
+        wsOut.Cells(i + 1, 1).Value = lineas(i)
+    Next i
+    wsOut.Columns(1).ColumnWidth = 60
+    MsgBox "Listo. Revisa la hoja RASTRO.", vbInformation
+End Sub
