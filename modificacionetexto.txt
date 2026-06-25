@@ -87,6 +87,15 @@ Sub GenerarBasesLimpias()
             EscribirHojaAnual wbDest, "Anual_NAV_" & tipo, 2, tipo, dicFondosTipo, ordenFondos, dicOrigen
 
             GenerarConsolidadoAnual wbDest, "Consol_" & tipo, tipo, dicFondosTipo, dicOrigen
+
+            ' Formato institucional Profuturo
+            AplicarFormatoProfuturo wbDest.Worksheets("Base_CC_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Base_DD_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Base_NAV_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Anual_CC_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Anual_DD_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Anual_NAV_" & tipo)
+            AplicarFormatoProfuturo wbDest.Worksheets("Consol_" & tipo)
         End If
     Next it
 
@@ -247,7 +256,7 @@ End Sub
 ' ============================================================
 '  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
 '   - Fecha (fin de mes) en la columna del tipo (colIni)
-'   - Orden fijo: [tipo] CC DD NAV  -> CC=colIni+1, DD=+2, NAV=+3
+'   - Orden fijo: [tipo] CC DD NAV -> CC=colIni+1, DD=+2, NAV=+3
 '   - Corta el sub-bloque en otro F1/F2/F3 o en MONEDA
 '   - Ajuste mismo mes: ultimo NAV manda, CC/DD del primero
 ' ============================================================
@@ -397,7 +406,6 @@ Private Sub RellenarF3conF2(wbDest As Workbook, dicTipos As Object, dicMeses As 
         Dim mesesF3 As Object
         Set mesesF3 = dicF3(etiqueta)
 
-        ' Ultimo mes con dato en F3
         Dim ultimoMesF3 As String
         ultimoMesF3 = ""
         Dim k As Variant
@@ -405,7 +413,6 @@ Private Sub RellenarF3conF2(wbDest As Workbook, dicTipos As Object, dicMeses As 
             If CStr(k) > ultimoMesF3 Then ultimoMesF3 = CStr(k)
         Next k
 
-        ' Copiar de F2 los meses posteriores al ultimo de F3 que no existan en F3
         For Each k In mesesF2.Keys
             Dim mes As String
             mes = CStr(k)
@@ -420,6 +427,85 @@ Private Sub RellenarF3conF2(wbDest As Workbook, dicTipos As Object, dicMeses As 
         Next k
 SiguienteRegla:
     Next r
+End Sub
+
+' ============================================================
+'  FORMATO INSTITUCIONAL PROFUTURO
+'  Arial 8, encabezado rojo RGB(212,12,12) con fondo gris,
+'  bordes solo arriba/abajo, numeros con separador de miles
+'  sin decimales, negativos como numero negativo.
+' ============================================================
+Private Sub AplicarFormatoProfuturo(ws As Worksheet)
+    Dim ROJO As Long
+    ROJO = RGB(212, 12, 12)
+    Dim GRIS As Long
+    GRIS = RGB(217, 217, 217)
+
+    Dim ultF As Long, ultC As Long
+    Dim cb As Range
+    ultF = 1
+    ultC = 1
+    On Error Resume Next
+    Set cb = ws.Cells.Find("*", , xlValues, , xlByRows, xlPrevious)
+    If Not cb Is Nothing Then ultF = cb.Row
+    Set cb = ws.Cells.Find("*", , xlValues, , xlByColumns, xlPrevious)
+    If Not cb Is Nothing Then ultC = cb.Column
+    On Error GoTo 0
+    If ultF < 1 Or ultC < 1 Then Exit Sub
+
+    Dim rngTodo As Range
+    Set rngTodo = ws.Range(ws.Cells(1, 1), ws.Cells(ultF, ultC))
+
+    With rngTodo.Font
+        .Name = "Arial"
+        .Size = 8
+        .Color = RGB(0, 0, 0)
+    End With
+
+    ' Numeros: separador de miles, SIN decimales, negativos como numero negativo
+    If ultF >= 2 Then
+        Dim rngDatos As Range
+        Set rngDatos = ws.Range(ws.Cells(2, 1), ws.Cells(ultF, ultC))
+        rngDatos.NumberFormat = "#,##0;-#,##0"
+    End If
+
+    ' Encabezado fila 1: rojo, negrita, fondo gris
+    Dim rngHdr As Range
+    Set rngHdr = ws.Range(ws.Cells(1, 1), ws.Cells(1, ultC))
+    With rngHdr
+        .Font.Color = ROJO
+        .Font.Bold = True
+        .Interior.Color = GRIS
+    End With
+
+    ' Bordes solo superior/inferior del encabezado
+    With rngHdr.Borders(xlEdgeTop)
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+        .Color = RGB(0, 0, 0)
+    End With
+    With rngHdr.Borders(xlEdgeBottom)
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+        .Color = RGB(0, 0, 0)
+    End With
+
+    ' Borde inferior de cierre en la ultima fila
+    If ultF >= 2 Then
+        With ws.Range(ws.Cells(ultF, 1), ws.Cells(ultF, ultC)).Borders(xlEdgeBottom)
+            .LineStyle = xlContinuous
+            .Weight = xlThin
+            .Color = RGB(0, 0, 0)
+        End With
+    End If
+
+    rngTodo.Borders(xlEdgeLeft).LineStyle = xlNone
+    rngTodo.Borders(xlEdgeRight).LineStyle = xlNone
+    rngTodo.Borders(xlInsideVertical).LineStyle = xlNone
+    rngTodo.Borders(xlInsideHorizontal).LineStyle = xlNone
+
+    ws.Columns(1).AutoFit
+    ws.Columns(2).AutoFit
 End Sub
 
 ' ============================================================
@@ -659,8 +745,6 @@ Private Sub EscribirHojaMetrica(wb As Workbook, ByVal nombreHoja As String, _
 
     ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nMeses + 2)).Value = salida
     ws.Rows(1).Font.Bold = True
-    ws.Columns(1).AutoFit
-    ws.Columns(2).AutoFit
 End Sub
 
 ' ============================================================
@@ -758,8 +842,6 @@ Private Sub EscribirHojaAnual(wb As Workbook, ByVal nombreHoja As String, _
 
     ws.Range(ws.Cells(2, 1), ws.Cells(1 + nFondos, nAnios + 2)).Value = salida
     ws.Rows(1).Font.Bold = True
-    ws.Columns(1).AutoFit
-    ws.Columns(2).AutoFit
 End Sub
 
 ' ============================================================
@@ -872,6 +954,7 @@ Private Sub EscribirBloqueConsolidado(ws As Worksheet, ByVal grupo As String, _
     ws.Cells(filaHdr, 4).Value = "NAV Cierre"
     ws.Range(ws.Cells(filaHdr, 1), ws.Cells(filaHdr, 4)).Font.Bold = True
     ws.Range(ws.Cells(filaHdr + 1, 1), ws.Cells(filaHdr + nA, 1)).NumberFormat = "@"
+    ws.Range(ws.Cells(filaHdr + 1, 2), ws.Cells(filaHdr + nA, 4)).NumberFormat = "#,##0;-#,##0"
 
     Dim i As Long
     For i = 0 To nA - 1
