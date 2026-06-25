@@ -1,140 +1,101 @@
-Option Explicit
+Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
+                          ByVal colIni As Long, ByVal colFin As Long, _
+                          ByVal etiqueta As String, _
+                          dicTipos As Object, dicMeses As Object, ordenFondos As Object)
 
-Sub RastrearPorCodigo()
-    Dim ruta As String
-    With Application.FileDialog(msoFileDialogFilePicker)
-        .Title = "Seleccione Marcas": .AllowMultiSelect = False
-        If .Show <> -1 Then Exit Sub
-        ruta = .SelectedItems(1)
-    End With
+    Dim r As Long
+    r = FILA_ENCABEZADO_DIARIO + 1
 
-    Dim soloNombre As String: soloNombre = Mid(ruta, InStrRev(ruta, "\") + 1)
-    Dim wb As Workbook, loAbri As Boolean, w As Workbook
-    For Each w In Application.Workbooks
-        If StrComp(w.Name, soloNombre, vbTextCompare) = 0 Then Set wb = w
-    Next w
-    If wb Is Nothing Then
-        Set wb = Workbooks.Open(ruta, ReadOnly:=True, UpdateLinks:=0)
-        loAbri = True
-    End If
+    Do While r <= nFilas
+        Dim etq As String
+        etq = UCase(Trim(CStr(datos(r, colIni) & "")))
 
-    Dim buscarCod As String
-    buscarCod = NormRastro(InputBox("Pega el CÓDIGO SBS del fondo (ej. ASF VII):", "Buscar por código"))
-    If Len(buscarCod) = 0 Then
-        If loAbri Then wb.Close False
-        Exit Sub
-    End If
+        If etq = "F1" Or etq = "F2" Or etq = "F3" Then
+            Dim tipo As String: tipo = etq
+            Dim filaHdr As Long: filaHdr = r
 
-    Dim salida As String
-    Dim encontrado As Boolean: encontrado = False
-    Dim hoja As Variant
+            ' Mapear columnas CC/DD/NAV de ESTE sub-bloque
+            Dim colCC As Long, colDD As Long, colNAV As Long
+            colCC = 0: colDD = 0: colNAV = 0
+            Dim c As Long, h As String
+            For c = colIni To colFin
+                h = UCase(Trim(CStr(datos(filaHdr, c) & "")))
+                Select Case h
+                    Case "CC": colCC = c
+                    Case "DD": colDD = c
+                    Case "NAV": colNAV = c
+                End Select
+            Next c
 
-    For Each hoja In Array("1", "2")
-        Dim ws As Worksheet: Set ws = Nothing
-        On Error Resume Next
-        Set ws = wb.Worksheets(CStr(hoja))
-        On Error GoTo 0
-        If ws Is Nothing Then GoTo SigH
-
-        ' Rango real
-        Dim ufr As Long, ucr As Long: ufr = 0: ucr = 0
-        Dim cb As Range
-        On Error Resume Next
-        Set cb = ws.Cells.Find("*", , xlValues, , xlByRows, xlPrevious)
-        If Not cb Is Nothing Then ufr = cb.Row
-        Set cb = ws.Cells.Find("*", , xlValues, , xlByColumns, xlPrevious)
-        If Not cb Is Nothing Then ucr = cb.Column
-        On Error GoTo 0
-        If ufr < 3 Or ucr < 1 Then GoTo SigH
-
-        Dim datos As Variant
-        datos = ws.Range(ws.Cells(1, 1), ws.Cells(ufr, ucr)).Value
-        If Not IsArray(datos) Then GoTo SigH
-        Dim nF As Long, nC As Long: nF = UBound(datos, 1): nC = UBound(datos, 2)
-        If nF < 3 Then GoTo SigH
-
-        ' Columnas de inicio (Día en fila 3)
-        Dim cols() As Long, nFon As Long: nFon = 0
-        ReDim cols(1 To nC)
-        Dim c As Long, vv As String
-        For c = 1 To nC
-            vv = LCase(Trim(CStr(datos(3, c) & "")))
-            If vv = "día" Or vv = "dia" Then nFon = nFon + 1: cols(nFon) = c
-        Next c
-        If nFon = 0 Then GoTo SigH
-
-        Dim f As Long, ci As Long, cf As Long
-        For f = 1 To nFon
-            ci = cols(f)
-            If f < nFon Then cf = cols(f + 1) - 1 Else cf = nC
-
-            Dim codM As String: codM = NormRastro(CStr(datos(2, ci) & ""))
-            If codM = buscarCod Then
-                encontrado = True
-                salida = salida & "=== " & CStr(datos(1, ci) & "") & " | Hoja " & hoja & _
-                         " | colIni=" & ci & " colFin=" & cf & " | nFilas=" & nF & " ===" & vbCrLf
-                salida = salida & "Codigo: [" & CStr(datos(2, ci) & "") & "]" & vbCrLf & vbCrLf
-
-                ' Volcar la primera columna del fondo (fechas/encabezados), fila por fila
-                Dim rr As Long, mostradas As Long: mostradas = 0
-                For rr = 4 To nF
-                    Dim val As Variant: val = datos(rr, ci)
-                    Dim txt As String: txt = Trim(CStr(val & ""))
-                    If Len(txt) > 0 Then
-                        salida = salida & "  f" & rr & ": [" & Left(txt, 16) & "] (" & TypeName(val) & ")" & vbCrLf
-                        mostradas = mostradas + 1
-                        If mostradas >= 200 Then
-                            salida = salida & "  ...(cortado a 200 filas)" & vbCrLf
-                            Exit For
-                        End If
-                    End If
-                Next rr
-                salida = salida & vbCrLf & "----------------------------------------" & vbCrLf & vbCrLf
+            ' Obtener (o crear) dicFondos de este tipo y dicMes de este fondo
+            Dim dicFondosTipo As Object
+            If dicTipos.Exists(tipo) Then
+                Set dicFondosTipo = dicTipos(tipo)
+            Else
+                Set dicFondosTipo = CreateObject("Scripting.Dictionary")
+                dicTipos.Add tipo, dicFondosTipo
             End If
-        Next f
-SigH:
-        Set ws = Nothing
-    Next hoja
 
-    If loAbri Then wb.Close False
+            Dim dicMes As Object
+            If dicFondosTipo.Exists(etiqueta) Then
+                Set dicMes = dicFondosTipo(etiqueta)
+            Else
+                Set dicMes = CreateObject("Scripting.Dictionary")
+                dicFondosTipo.Add etiqueta, dicMes
+                Dim claveOrden As String: claveOrden = tipo & "|" & etiqueta
+                If Not ordenFondos.Exists(claveOrden) Then ordenFondos.Add claveOrden, ordenFondos.Count
+            End If
 
-    If Not encontrado Then
-        salida = "No se encontro ningun fondo con el codigo [" & buscarCod & "]." & vbCrLf & _
-                 "Verifica que el codigo este bien copiado."
-    End If
+            ' Leer las fechas de ESTE sub-bloque, fila por fila hacia abajo.
+            ' El sub-bloque termina en cuanto aparece algo que NO es fecha válida
+            ' (código SBS, "MONEDA?", otro F1/F2/F3, o se acaba la hoja),
+            ' PERO toleramos celdas vacías intermedias antes de los datos.
+            Dim rr As Long: rr = filaHdr + 1
+            Dim yaLeyoDatos As Boolean: yaLeyoDatos = False
 
-    ' Escribir a un archivo de texto en el Escritorio (o TEMP si falla)
-    Dim rutaTxt As String
-    rutaTxt = Environ("USERPROFILE") & "\Desktop\RASTRO_ASF.txt"
+            Do While rr <= nFilas
+                Dim valFecha As Variant: valFecha = datos(rr, colIni)
+                Dim sCelda As String: sCelda = UCase(Trim(CStr(valFecha & "")))
 
-    Dim ff As Integer: ff = FreeFile
-    On Error Resume Next
-    Open rutaTxt For Output As #ff
-    If Err.Number <> 0 Then
-        Err.Clear
-        rutaTxt = Environ("TEMP") & "\RASTRO_ASF.txt"
-        ff = FreeFile
-        Open rutaTxt For Output As #ff
-    End If
-    On Error GoTo 0
+                ' Otro encabezado de tipo -> fin de este sub-bloque
+                If sCelda = "F1" Or sCelda = "F2" Or sCelda = "F3" Then Exit Do
 
-    Print #ff, salida
-    Close #ff
+                Dim clave As String: clave = ParsearMesAnio(valFecha)
 
-    On Error Resume Next
-    CreateObject("WScript.Shell").Run "notepad.exe """ & rutaTxt & """", 1, False
-    On Error GoTo 0
+                If clave <> "" Then
+                    ' Es una fecha válida: leer datos
+                    yaLeyoDatos = True
+                    Dim cc As Double, dd As Double, nav As Double
+                    cc = LeerNumero(datos, rr, colCC)
+                    dd = LeerNumero(datos, rr, colDD)
+                    nav = LeerNumero(datos, rr, colNAV)
 
-    MsgBox "Listo. Se guardo y abrio el archivo:" & vbCrLf & rutaTxt, vbInformation
+                    If dicMes.Exists(clave) Then
+                        Dim arr As Variant: arr = dicMes(clave)
+                        arr(2) = nav            ' ajuste: último NAV manda
+                        dicMes(clave) = arr
+                    Else
+                        dicMes.Add clave, Array(cc, dd, nav)
+                    End If
+                    If Not dicMeses.Exists(clave) Then dicMeses.Add clave, True
+                Else
+                    ' No es fecha válida
+                    If sCelda = "" Then
+                        ' Celda vacía: si todavía no empezaron los datos, tolerar y seguir.
+                        ' Si ya leímos datos, una vacía marca el fin del sub-bloque.
+                        If yaLeyoDatos Then Exit Do
+                    Else
+                        ' Texto/código/MONEDA? -> fin de este sub-bloque
+                        Exit Do
+                    End If
+                End If
+
+                rr = rr + 1
+            Loop
+
+            r = rr
+        Else
+            r = r + 1
+        End If
+    Loop
 End Sub
-
-Private Function NormRastro(ByVal s As String) As String
-    Dim r As String
-    r = UCase(Trim(CStr(s)))
-    r = Replace(r, " ", "")
-    r = Replace(r, Chr(160), "")
-    r = Replace(r, vbTab, "")
-    r = Replace(r, Chr(10), "")
-    r = Replace(r, Chr(13), "")
-    NormRastro = r
-End Function
