@@ -62,6 +62,9 @@ Sub GenerarBasesLimpias()
     If loAbriYo Then wbMarcas.Close SaveChanges:=False
     Set wbMarcas = Nothing
 
+    ' Rellenar F3 con F2 para los fondos configurados en "Reglas_F3"
+    RellenarF3conF2 wbDest, dicTipos, dicMeses
+
     Dim mesesOrdenados As Variant
     mesesOrdenados = OrdenarClaves(dicMeses)
 
@@ -243,10 +246,8 @@ End Sub
 
 ' ============================================================
 '  PROCESAR UN FONDO: leer sub-bloques F1/F2/F3 apilados.
-'  Estructura confirmada del archivo real:
-'   - Fecha (fin de mes, datetime) en la columna del tipo (colIni)
+'   - Fecha (fin de mes) en la columna del tipo (colIni)
 '   - Orden fijo: [tipo] CC DD NAV  -> CC=colIni+1, DD=+2, NAV=+3
-'   - Antes de cada F1/F2/F3 reaparece el codigo SBS (se ignora)
 '   - Corta el sub-bloque en otro F1/F2/F3 o en MONEDA
 '   - Ajuste mismo mes: ultimo NAV manda, CC/DD del primero
 ' ============================================================
@@ -268,13 +269,11 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             Dim filaHdr As Long
             filaHdr = r
 
-            ' Columnas por POSICION FIJA: [tipo] CC DD NAV
             Dim colCC As Long, colDD As Long, colNAV As Long
             colCC = colIni + 1
             colDD = colIni + 2
             colNAV = colIni + 3
 
-            ' Respaldo por texto si las posiciones no calzan
             Dim hCC As String, hDD As String, hNAV As String
             hCC = ""
             hDD = ""
@@ -350,6 +349,77 @@ Private Sub ProcesarFondo(datos As Variant, ByVal nFilas As Long, _
             r = r + 1
         End If
     Loop
+End Sub
+
+' ============================================================
+'  RELLENAR F3 CON F2 para fondos configurados en "Reglas_F3"
+'  Desde el primer mes faltante de F3 en adelante, copia
+'  CC/DD/NAV de F2 (solo meses que F2 tenga y F3 no).
+' ============================================================
+Private Sub RellenarF3conF2(wbDest As Workbook, dicTipos As Object, dicMeses As Object)
+    If Not dicTipos.Exists("F2") Then Exit Sub
+    If Not dicTipos.Exists("F3") Then Exit Sub
+
+    Dim dicF2 As Object
+    Set dicF2 = dicTipos("F2")
+    Dim dicF3 As Object
+    Set dicF3 = dicTipos("F3")
+
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = wbDest.Worksheets("Reglas_F3")
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = wbDest.Worksheets.Add(After:=wbDest.Worksheets(wbDest.Worksheets.Count))
+        ws.Name = "Reglas_F3"
+        ws.Cells(1, 1).Value = "Etiqueta Fondo (igual que en las bases)"
+        ws.Range("A1").Font.Bold = True
+        ws.Columns("A").ColumnWidth = 40
+        Exit Sub
+    End If
+
+    Dim ultFila As Long
+    ultFila = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    If ultFila < 2 Then Exit Sub
+
+    Dim r As Long
+    For r = 2 To ultFila
+        Dim etiqueta As String
+        etiqueta = Trim(CStr(ws.Cells(r, 1).Value & ""))
+        If Len(etiqueta) = 0 Then GoTo SiguienteRegla
+
+        If Not dicF2.Exists(etiqueta) Then GoTo SiguienteRegla
+        If Not dicF3.Exists(etiqueta) Then GoTo SiguienteRegla
+
+        Dim mesesF2 As Object
+        Set mesesF2 = dicF2(etiqueta)
+        Dim mesesF3 As Object
+        Set mesesF3 = dicF3(etiqueta)
+
+        ' Ultimo mes con dato en F3
+        Dim ultimoMesF3 As String
+        ultimoMesF3 = ""
+        Dim k As Variant
+        For Each k In mesesF3.Keys
+            If CStr(k) > ultimoMesF3 Then ultimoMesF3 = CStr(k)
+        Next k
+
+        ' Copiar de F2 los meses posteriores al ultimo de F3 que no existan en F3
+        For Each k In mesesF2.Keys
+            Dim mes As String
+            mes = CStr(k)
+            If mes > ultimoMesF3 Then
+                If Not mesesF3.Exists(mes) Then
+                    Dim arrF2 As Variant
+                    arrF2 = mesesF2(mes)
+                    mesesF3.Add mes, Array(arrF2(0), arrF2(1), arrF2(2))
+                    If Not dicMeses.Exists(mes) Then dicMeses.Add mes, True
+                End If
+            End If
+        Next k
+SiguienteRegla:
+    Next r
 End Sub
 
 ' ============================================================
